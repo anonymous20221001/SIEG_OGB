@@ -4,7 +4,7 @@ SIEG
 
 Code for paper [**SIEG: Structural Information Enhanced Graph representation**](OGB_VESSEL_SIEG.pdf)
 
-This implementation of SIEG for [**Open Graph Benchmak**](https://arxiv.org/abs/2005.00687) datasets (ogbl-vessel) is based on [**OGB**](https://github.com/snap-stanford/ogb). Thanks for their contributions.
+This implementation of PairRE for [**Open Graph Benchmak**](https://arxiv.org/abs/2005.00687) datasets (ogbl-wikikg and ogbl-biokg) is based on [**OGB**](https://github.com/snap-stanford/ogb). Thanks for their contributions.
 
 Requirements
 ------------
@@ -25,8 +25,8 @@ Result
 -----
 |              | ogbl-vessel | ogbl-citation2 |
 |--------------|---------------------|-----------------------|
-| Val results | 82.55%&plusmn;0.40% | 88.05%&plusmn;0.44% | 
-| Test results | 82.49%&plusmn;0.41% | 88.12%&plusmn;0.46% |
+| Val results | 82.55%&plusmn;0.40% | 89.48%&plusmn;0.08% | 
+| Test results | 82.49%&plusmn;0.41% | 89.57%&plusmn;0.10% |
 
 Usages
 ------
@@ -39,6 +39,16 @@ Usages
 or
 ```
     sh train_vessel.sh
+```
+
+### ogbl-citation2
+
+```
+    python train.py --grpe_cross --device 0 --num_heads 8 --dataset ogbl-citation2 --use_feature --use_feature_GT --use_edge_weight --epochs 15 --train_percent 8 --val_percent 4 --test_percent 1 --final_val_percent 100 --final_test_percent 100 --model SIEG --runs 10 --batch_size 64 --lr 2e-05 --num_workers 24 --sortpool_k 0.6 --dynamic_train --dynamic_val --dynamic_test --use_len_spd --use_num_spd --use_cnb_jac --use_cnb_aa
+```
+or
+```
+    sh train_citation2.sh
 ```
 
 License

@@ -1,3 +1,13 @@
+#!/bin/sh
+#****************************************************************#
+# ScriptName: train_vessel.sh
+# Author: $SHTERM_REAL_USER@alibaba-inc.com
+# Create Date: 2022-01-13 15:13
+# Modify Author: $SHTERM_REAL_USER@alibaba-inc.com
+# Modify Date: 2022-03-15 11:58
+# Function: 
+#***************************************************************#
+
 #export utils=True
 postfix=`TZ=UTC-8 date  "+%Y%m%d-%H%M%S"`
 

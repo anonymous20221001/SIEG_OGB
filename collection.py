@@ -1,3 +1,13 @@
+#!/usr/bin/python
+#****************************************************************#
+# ScriptName: collection.py
+# Author: $SHTERM_REAL_USER@alibaba-inc.com
+# Create Date: 2022-01-13 16:06
+# Modify Author: $SHTERM_REAL_USER@alibaba-inc.com
+# Modify Date: 2022-01-22 11:53
+# Function: 
+#***************************************************************#
+
 import torch
 from torch import Tensor
 from typing import Tuple

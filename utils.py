@@ -1,3 +1,7 @@
+# Copyright (c) Facebook, Inc. and its affiliates.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
 import sys
 import math
 from tqdm import tqdm
@@ -20,7 +24,7 @@ import copy as cp
 import pdb
 
 
-#@TimerGuard("neighbors", "utils")
+# @TimerGuard("neighbors", "utils")
 def neighbors(fringe, A, outgoing=True):
     # Find all 1-hop neighbors of nodes in fringe from graph A, 
     # where A is a scipy csr adjacency matrix.
@@ -167,6 +171,23 @@ def k_hop_subgraph_tensor(src: int, dst: int, num_hops: int, A_ssp: ssp.csr_matr
             break
         nodes = torch.cat([nodes, fringe])
         dists = torch.cat([dists, torch.zeros((len(fringe)), dtype=torch.long) + dist])
+    #edge_index = torch.cat(edge_index_list, dim=1)
+    #val = torch.cat(val_list)
+    #comp = torch.stack([(edge_index[0].t().unsqueeze(axis=1) == nodes.unsqueeze(axis=1).t()), (edge_index[1].t().unsqueeze(axis=1) == nodes.unsqueeze(axis=1).t())])
+    #valid_idc = comp.any(-1).all(0)
+    #edge_index_val = torch.cat([edge_index, val.unsqueeze(0)], dim=0)
+    #edge_index_val = edge_index_val[:, valid_idc]
+    #edge_index_val = torch.unique(edge_index_val, dim=1)
+    #edge_index = edge_index_val[:2, :]
+    #val = edge_index_val[2, :]
+    #mapper = {x.item(): i for i, x in enumerate(nodes)}
+    #edge_index = torch.tensor([mapper[x.item()] for x in edge_index.flatten()]).reshape(2, -1)
+    #num_nodes = nodes.numel()
+    #num_edges = edge_index.size(1)
+    ##subgraph = torch_sparse.cat(A[nodes], A_t[nodes])
+    ##subgraph = subgraph[:, nodes]
+    ##subgraph = subgraph.to_scipy(layout='csr')
+    #subgraph = ssp.csr_matrix((val, (edge_index[0], edge_index[1])), shape=(num_nodes, num_nodes))
     nodes = nodes.tolist()
     dists = dists.tolist()
 
@@ -367,7 +388,7 @@ def extract_enclosing_subgraphs_tensor(link_index, A_ssp: ssp.csr_matrix, A: tor
     return data_list
 
 
-def do_edge_split(dataset, fast_split=False, val_ratio=0.05, test_ratio=0.1):
+def do_edge_split(dataset, fast_split=False, val_ratio=0.05, test_ratio=0.1, neg_ratio=1):
     data = dataset[0]
     random.seed(234)
     torch.manual_seed(234)
@@ -377,7 +398,7 @@ def do_edge_split(dataset, fast_split=False, val_ratio=0.05, test_ratio=0.1):
         edge_index, _ = add_self_loops(data.train_pos_edge_index)
         data.train_neg_edge_index = negative_sampling(
             edge_index, num_nodes=data.num_nodes,
-            num_neg_samples=data.train_pos_edge_index.size(1))
+            num_neg_samples=int(data.train_pos_edge_index.size(1)*neg_ratio))
     else:
         num_nodes = data.num_nodes
         row, col = data.edge_index
@@ -398,7 +419,7 @@ def do_edge_split(dataset, fast_split=False, val_ratio=0.05, test_ratio=0.1):
         # Negative edges (cannot guarantee (i,j) and (j,i) won't both appear)
         neg_edge_index = negative_sampling(
             data.edge_index, num_nodes=num_nodes,
-            num_neg_samples=row.size(0))
+            num_neg_samples=int(row.size(0)*neg_ratio))
         data.val_neg_edge_index = neg_edge_index[:, :n_v]
         data.test_neg_edge_index = neg_edge_index[:, n_v:n_v + n_t]
         data.train_neg_edge_index = neg_edge_index[:, n_v + n_t:]
@@ -413,14 +434,28 @@ def do_edge_split(dataset, fast_split=False, val_ratio=0.05, test_ratio=0.1):
     return split_edge
 
 
-def get_pos_neg_edges(split, split_edge, edge_index, num_nodes, percent=100):
+def get_dict_info(d):
+    info = ''
+    for k,v in d.items():
+        if isinstance(v, torch.Tensor):
+            info += '{}: {}\n'.format(k, v.size())
+        elif isinstance(v, np.ndarray):
+            info += '{}: {}\n'.format(k, v.shape)
+        elif isinstance(v, list):
+            info += '{}: {}\n'.format(k, len(v))
+        elif isinstance(v, dict):
+            info += '{}:\n{}'.format(k, get_dict_info(v))
+    return info
+
+
+def get_pos_neg_edges(split, split_edge, edge_index, num_nodes, percent=100, neg_ratio=1):
     if 'edge' in split_edge['train']:
         pos_edge = split_edge[split]['edge'].t()
         if split == 'train':
             new_edge_index, _ = add_self_loops(edge_index)
             neg_edge = negative_sampling(
                 new_edge_index, num_nodes=num_nodes,
-                num_neg_samples=pos_edge.size(1))
+                num_neg_samples=int(pos_edge.size(1)*neg_ratio))
         else:
             neg_edge = split_edge[split]['edge_neg'].t()
         # subsample for pos_edge
@@ -440,7 +475,7 @@ def get_pos_neg_edges(split, split_edge, edge_index, num_nodes, percent=100):
         source = split_edge[split]['source_node']
         target = split_edge[split]['target_node']
         if split == 'train':
-            target_neg = torch.randint(0, num_nodes, [target.size(0), 1],
+            target_neg = torch.randint(0, num_nodes, [target.size(0), int(neg_ratio)],
                                        dtype=torch.long)
         else:
             target_neg = split_edge[split]['target_node_neg']
@@ -458,119 +493,212 @@ def get_pos_neg_edges(split, split_edge, edge_index, num_nodes, percent=100):
     return pos_edge, neg_edge
 
 
-def CN(A, edge_index, batch_size=100000, cn_type='in'):
+def np_sampling(rw_dict, ptr, neighs, bsize, target, num_walks=100, num_steps=3, nthread=-1):
+    with tqdm(total=len(target)) as pbar:
+        for batch in gen_batch(target, bsize, True):
+            walk_set, freqs = run_walk(ptr, neighs, batch, num_walks=num_walks, num_steps=num_steps, replacement=True, nthread=nthread)
+            node_id, node_freq = freqs[:, 0], freqs[:, 1]
+            rw_dict.update(dict(zip(batch, zip(walk_set, node_id, node_freq))))
+            pbar.update(len(batch))
+    return rw_dict
+
+
+def gen_dataset(dataset, graphs, args, bsize=10000, nthread=-1):
+    G_val, G_full = graphs['val'], graphs['test']
+
+    keep_neg = False if 'ppa' not in args.dataset else True
+    #keep_neg = False
+
+    test_pos_edge, test_neg_edge = get_pos_neg_edges('test', dataset.split_edge, ratio=args.test_ratio,
+                                                     keep_neg=keep_neg)
+    val_pos_edge, val_neg_edge = get_pos_neg_edges('valid', dataset.split_edge, ratio=args.valid_ratio,
+                                                   keep_neg=keep_neg)
+
+    val_dict = test_dict = np_sampling({}, G_val.indptr, G_val.indices, bsize=bsize,
+                                       target=torch.unique(
+                                           torch.cat([inf_set['val']['E'], inf_set['test']['E']])).tolist(),
+                                       num_walks=args.num_walk, num_steps=args.num_step - 1, nthread=nthread)
+
+    args.w_max = dataset.train_wmax if args.use_weight else None
+
+    return test_dict, val_dict, inf_set
+
+
+def CN(A, edge_index, batch_size=100000, cn_types=['in']):
     # The Common Neighbor heuristic score.
     num_nodes = A.shape[0]
     A_t = A.transpose().tocsr()
-    if cn_type == 'undirected':
+
+    if 'undirected' in cn_types:
         x_ind, y_ind = A.nonzero()
         weights = np.array(A[x_ind, y_ind]).flatten()
         A_undirected = ssp.csr_matrix((np.concatenate([weights, weights]), (np.concatenate([x_ind, y_ind]), np.concatenate([y_ind, x_ind]))), shape=(num_nodes, num_nodes))
+
     link_loader = DataLoader(range(edge_index.size(1)), batch_size)
-    scores = []
-    for ind in tqdm(link_loader):
-        src, dst = edge_index[0, ind], edge_index[1, ind]
-        if cn_type == 'undirected':
-            # undirected
-            cur_scores = np.array(np.sum(A_undirected[src].multiply(A_undirected[dst]), 1)).flatten()
-        elif cn_type == 'in':
-            # center in
-            cur_scores = np.array(np.sum(A[src].multiply(A[dst]), 1)).flatten()
-        elif cn_type == 'out':
-            # center out
-            cur_scores = np.array(np.sum(A_t[src].multiply(A_t[dst]), 1)).flatten()
-        elif cn_type == 's2o':
-            # source to destination
-            cur_scores = np.array(np.sum(A[src].multiply(A_t[dst]), 1)).flatten()
-        elif cn_type == 'o2s':
-            # destination to source
-            cur_scores = np.array(np.sum(A_t[src].multiply(A[dst]), 1)).flatten()
-        scores.append(cur_scores)
-    return torch.FloatTensor(np.concatenate(scores, 0)), edge_index
+    multi_type_scores = []
+    for cn_type in cn_types:
+        scores = []
+        for ind in tqdm(link_loader):
+            src, dst = edge_index[0, ind], edge_index[1, ind]
+            if cn_type == 'undirected':
+                # undirected
+                cur_scores = np.array(np.sum(A_undirected[src].multiply(A_undirected[dst]), 1)).flatten()
+            elif cn_type == 'in':
+                # center in
+                cur_scores = np.array(np.sum(A[src].multiply(A[dst]), 1)).flatten()
+            elif cn_type == 'out':
+                # center out
+                cur_scores = np.array(np.sum(A_t[src].multiply(A_t[dst]), 1)).flatten()
+            elif cn_type == 's2o':
+                # source to destination
+                cur_scores = np.array(np.sum(A[src].multiply(A_t[dst]), 1)).flatten()
+            elif cn_type == 'o2s':
+                # destination to source
+                cur_scores = np.array(np.sum(A_t[src].multiply(A[dst]), 1)).flatten()
+            scores.append(cur_scores)
+        multi_type_scores.append(torch.FloatTensor(np.concatenate(scores, 0)))
+    return torch.stack(multi_type_scores), edge_index
 
 
-def Jaccard(A, edge_index, batch_size=100000, cn_type='in'):
+def Jaccard(A, edge_index, batch_size=100000, cn_types=['in']):
     # The Adamic-Adar heuristic score.
     num_nodes = A.shape[0]
     degree_in = A.sum(axis=0).getA1() # in_degree
 
     A_t = A.transpose().tocsr()
     degree_out = A_t.sum(axis=0).getA1()
-    if cn_type == 'undirected':
+
+    if 'undirected' in cn_types:
         x_ind, y_ind = A.nonzero()
         weights = np.array(A[x_ind, y_ind]).flatten()
         A_undirected = ssp.csr_matrix((np.concatenate([weights, weights]), (np.concatenate([x_ind, y_ind]), np.concatenate([y_ind, x_ind]))), shape=(num_nodes, num_nodes))
         degree_undirected = A_undirected.sum(axis=0).getA1() # degree
+
     link_loader = DataLoader(range(edge_index.size(1)), batch_size)
-    scores = []
-    for ind in tqdm(link_loader):
-        src, dst = edge_index[0, ind], edge_index[1, ind]
-        if cn_type == 'undirected':
-            # undirected
-            intersection_scores = np.array(np.sum(A_undirected[src].multiply(A_undirected[dst]), 1)).flatten()
-            union_scores = degree_undirected[src] + degree_undirected[dst] - intersection_scores
-        elif cn_type == 'in':
-            # center in
-            intersection_scores = np.array(np.sum(A[src].multiply(A[dst]), 1)).flatten()
-            union_scores = degree_in[src] + degree_in[dst] - intersection_scores
-        elif cn_type == 'out':
-            # center out
-            intersection_scores = np.array(np.sum(A_t[src].multiply(A_t[dst]), 1)).flatten()
-            union_scores = degree_out[src] + degree_out[dst] - intersection_scores
-        elif cn_type == 's2o':
-            # source to destination
-            intersection_scores = np.array(np.sum(A[src].multiply(A_t[dst]), 1)).flatten()
-            union_scores = degree_out[src] + degree_in[dst] - intersection_scores
-        elif cn_type == 'o2s':
-            # destination to source
-            intersection_scores = np.array(np.sum(A_t[src].multiply(A[dst]), 1)).flatten()
-            union_scores = degree_in[src] + degree_out[dst] - intersection_scores
-        cur_scores = intersection_scores / union_scores
-        cur_scores[np.isinf(cur_scores)] = 0
-        scores.append(cur_scores)
-    return torch.FloatTensor(np.concatenate(scores, 0)), edge_index
+    multi_type_scores = []
+    for cn_type in cn_types:
+        scores = []
+        for ind in tqdm(link_loader):
+            src, dst = edge_index[0, ind], edge_index[1, ind]
+            if cn_type == 'undirected':
+                # undirected
+                intersection_scores = np.array(np.sum(A_undirected[src].multiply(A_undirected[dst]), 1)).flatten()
+                union_scores = degree_undirected[src] + degree_undirected[dst] - intersection_scores
+            elif cn_type == 'in':
+                # center in
+                intersection_scores = np.array(np.sum(A[src].multiply(A[dst]), 1)).flatten()
+                union_scores = degree_out[src] + degree_out[dst] - intersection_scores
+            elif cn_type == 'out':
+                # center out
+                intersection_scores = np.array(np.sum(A_t[src].multiply(A_t[dst]), 1)).flatten()
+                union_scores = degree_in[src] + degree_in[dst] - intersection_scores
+            elif cn_type == 's2o':
+                # source to destination
+                intersection_scores = np.array(np.sum(A[src].multiply(A_t[dst]), 1)).flatten()
+                union_scores = degree_out[src] + degree_in[dst] - intersection_scores
+            elif cn_type == 'o2s':
+                # destination to source
+                intersection_scores = np.array(np.sum(A_t[src].multiply(A[dst]), 1)).flatten()
+                union_scores = degree_in[src] + degree_out[dst] - intersection_scores
+            cur_scores = intersection_scores / union_scores
+            cur_scores[np.isinf(cur_scores)] = 0
+            cur_scores[np.isnan(cur_scores)] = 0
+            scores.append(cur_scores)
+        multi_type_scores.append(torch.FloatTensor(np.concatenate(scores, 0)))
+    return torch.stack(multi_type_scores), edge_index
 
 
-def AA(A, edge_index, batch_size=100000, cn_type='in'):
+def AA(A, edge_index, batch_size=100000, cn_types=['in']):
     # The Adamic-Adar heuristic score.
     num_nodes = A.shape[0]
-    multiplier = 1 / np.log(A.sum(axis=0)) # in_degree
-    multiplier[np.isinf(multiplier)] = 0
-    A_ = A.multiply(multiplier).tocsr()
+    div_log_deg_multiplier = 1 / np.log(A.sum(axis=0)) # in_degree
+    div_log_deg_multiplier[np.isinf(div_log_deg_multiplier)] = 2.0
+    A_div_log_deg = A.multiply(div_log_deg_multiplier).tocsr()
 
     A_t = A.transpose().tocsr()
-    multiplier_t = 1 / np.log(A_t.sum(axis=0))
-    multiplier_t[np.isinf(multiplier_t)] = 0
-    A_t_ = A_t.multiply(multiplier_t).tocsr()
-    if cn_type == 'undirected':
-        x_ind, y_ind = A.nonzero()
-        weights = np.array(A[x_ind, y_ind]).flatten()
-        A_undirected = ssp.csr_matrix((np.concatenate([weights, weights]), (np.concatenate([x_ind, y_ind]), np.concatenate([y_ind, x_ind]))), shape=(num_nodes, num_nodes))
-        multiplier_undirected = 1 / np.log(A_undirected.sum(axis=0)) # degree
-        multiplier_undirected[np.isinf(multiplier_undirected)] = 0
-        A_undirected_ = A_undirected.multiply(multiplier_undirected).tocsr()
+    div_log_deg_multiplier_t = 1 / np.log(A_t.sum(axis=0))
+    div_log_deg_multiplier_t[np.isinf(div_log_deg_multiplier_t)] = 2.0
+    A_t_div_log_deg = A_t.multiply(div_log_deg_multiplier_t).tocsr()
+
+    x_ind, y_ind = A.nonzero()
+    weights = np.array(A[x_ind, y_ind]).flatten()
+    A_undirected = ssp.csr_matrix((np.concatenate([weights, weights]), (np.concatenate([x_ind, y_ind]), np.concatenate([y_ind, x_ind]))), shape=(num_nodes, num_nodes))
+    div_log_deg_multiplier_undirected = 1 / np.log(A_undirected.sum(axis=0)) # degree
+    div_log_deg_multiplier_undirected[np.isinf(div_log_deg_multiplier_undirected)] = 2.0
+    if 'undirected' in cn_types:
+        A_undirected_div_log_deg = A_undirected.multiply(div_log_deg_multiplier_undirected).tocsr()
+    A_t_undirected_div_log_deg = A_t.multiply(div_log_deg_multiplier_undirected).tocsr()
+
     link_loader = DataLoader(range(edge_index.size(1)), batch_size)
-    scores = []
-    for ind in tqdm(link_loader):
-        src, dst = edge_index[0, ind], edge_index[1, ind]
-        if cn_type == 'undirected':
-            # undirected
-            cur_scores = np.array(np.sum(A_undirected[src].multiply(A_undirected_[dst]), 1)).flatten()
-        elif cn_type == 'in':
-            # center in
-            cur_scores = np.array(np.sum(A[src].multiply(A_[dst]), 1)).flatten()
-        elif cn_type == 'out':
-            # center out
-            cur_scores = np.array(np.sum(A_t[src].multiply(A_t_[dst]), 1)).flatten()
-        elif cn_type == 's2o':
-            # source to destination
-            cur_scores = np.array(np.sum(A[src].multiply(A_t_[dst]), 1)).flatten()
-        elif cn_type == 'o2s':
-            # destination to source
-            cur_scores = np.array(np.sum(A_t_[src].multiply(A[dst]), 1)).flatten()
-        scores.append(cur_scores)
-    scores = np.concatenate(scores, 0)
-    return torch.FloatTensor(scores), edge_index
+    multi_type_scores = []
+    for cn_type in cn_types:
+        scores = []
+        for ind in tqdm(link_loader):
+            src, dst = edge_index[0, ind], edge_index[1, ind]
+            if cn_type == 'undirected':
+                # undirected
+                cur_scores = np.array(np.sum(A_undirected[src].multiply(A_undirected_div_log_deg[dst]), 1)).flatten()
+            elif cn_type == 'in':
+                # center in
+                cur_scores = np.array(np.sum(A[src].multiply(A_div_log_deg[dst]), 1)).flatten()
+            elif cn_type == 'out':
+                # center out
+                cur_scores = np.array(np.sum(A_t[src].multiply(A_t_div_log_deg[dst]), 1)).flatten()
+            elif cn_type == 's2o':
+                # source to destination
+                cur_scores = np.array(np.sum(A[src].multiply(A_t_undirected_div_log_deg[dst]), 1)).flatten()
+            elif cn_type == 'o2s':
+                # destination to source
+                cur_scores = np.array(np.sum(A_t_undirected_div_log_deg[src].multiply(A[dst]), 1)).flatten()
+            scores.append(cur_scores)
+        multi_type_scores.append(torch.FloatTensor(np.concatenate(scores, 0)))
+    return torch.stack(multi_type_scores), edge_index
+
+
+def RA(A, edge_index, batch_size=100000, cn_types=['in']):
+    # The Adamic-Adar heuristic score.
+    num_nodes = A.shape[0]
+    div_deg_multiplier = 1 / A.sum(axis=0) # in_degree
+    div_deg_multiplier[np.isinf(div_deg_multiplier)] = 0.0
+    A_div_deg = A.multiply(div_deg_multiplier).tocsr()
+
+    A_t = A.transpose().tocsr()
+    div_deg_multiplier_t = 1 / A_t.sum(axis=0)
+    div_deg_multiplier_t[np.isinf(div_deg_multiplier_t)] = 0.0
+    A_t_div_deg = A_t.multiply(div_deg_multiplier_t).tocsr()
+
+    x_ind, y_ind = A.nonzero()
+    weights = np.array(A[x_ind, y_ind]).flatten()
+    A_undirected = ssp.csr_matrix((np.concatenate([weights, weights]), (np.concatenate([x_ind, y_ind]), np.concatenate([y_ind, x_ind]))), shape=(num_nodes, num_nodes))
+    div_deg_multiplier_undirected = 1 / A_undirected.sum(axis=0) # degree
+    div_deg_multiplier_undirected[np.isinf(div_deg_multiplier_undirected)] = 0.0
+    if 'undirected' in cn_types:
+        A_undirected_div_deg = A_undirected.multiply(div_deg_multiplier_undirected).tocsr()
+
+    link_loader = DataLoader(range(edge_index.size(1)), batch_size)
+    multi_type_scores = []
+    for cn_type in cn_types:
+        scores = []
+        for ind in tqdm(link_loader):
+            src, dst = edge_index[0, ind], edge_index[1, ind]
+            if cn_type == 'undirected':
+                # undirected
+                cur_scores = np.array(np.sum(A_undirected[src].multiply(A_undirected_div_deg[dst]), 1)).flatten()
+            elif cn_type == 'in':
+                # center in
+                cur_scores = np.array(np.sum(A[src].multiply(A_div_deg[dst]), 1)).flatten()
+            elif cn_type == 'out':
+                # center out
+                cur_scores = np.array(np.sum(A_t[src].multiply(A_t_div_deg[dst]), 1)).flatten()
+            elif cn_type == 's2o':
+                # source to destination
+                cur_scores = np.array(np.sum(A[src].multiply(A_t_div_deg[dst]), 1)).flatten()
+            elif cn_type == 'o2s':
+                # destination to source
+                cur_scores = np.array(np.sum(A_t[src].multiply(A_div_deg[dst]), 1)).flatten()
+            scores.append(cur_scores)
+        multi_type_scores.append(torch.FloatTensor(np.concatenate(scores, 0)))
+    return torch.stack(multi_type_scores), edge_index
 
 
 def PPR(A, edge_index):
@@ -625,11 +753,12 @@ class Logger(object):
     def print_statistics(self, run=None, f=sys.stdout, std=False):
         if run is not None:
             result = 100 * torch.tensor(self.results[run])
-            argmax = result[:, 0].argmax().item()
+            argmax = result[:-1, 0].argmax().item()
             print(f'Run {run + 1:02d}:', file=f)
-            print(f'Highest Valid: {result[:, 0].max():.2f}', file=f)
+            print(f'Highest Valid: {result[:-1, 0].max():.2f}', file=f)
             print(f'Highest Eval Point: {argmax + 1}', file=f)
-            print(f'   Final Test: {result[argmax, 1]:.2f}', file=f)
+            print(f'Final valid: {result[-1, 0]:.2f}', file=f)
+            print(f' Final Test: {result[-1, 1]:.2f}', file=f)
             if std:
                 print(f'Highest Valid: {result[:, 0].mean():.2f} ± {result[:, 0].std():.2f}', file=f)
                 print(f'   Final Test: {result[:, 1].mean():.2f} ± {result[:, 1].std():.2f}', file=f)
@@ -642,15 +771,17 @@ class Logger(object):
 
             best_results = []
             for r in result:
-                valid = r[:, 0].max().item()
-                test = r[r[:, 0].argmax(), 1].item()
+                valid = r[-1, 0].item()
+                test = r[-1, 1].item()
+                # valid = r[:, 0].max().item()
+                # test = r[r[:, 0].argmax(), 1].item()
                 best_results.append((valid, test))
 
             best_result = torch.tensor(best_results)
 
             print(f'All runs:', file=f)
             r = best_result[:, 0]
-            print(f'Highest Valid: {r.mean():.2f} ± {r.std():.2f}', file=f)
+            print(f'Final Valid: {r.mean():.2f} ± {r.std():.2f}', file=f)
             r = best_result[:, 1]
-            print(f'   Final Test: {r.mean():.2f} ± {r.std():.2f}', file=f)
+            print(f' Final Test: {r.mean():.2f} ± {r.std():.2f}', file=f)
 
