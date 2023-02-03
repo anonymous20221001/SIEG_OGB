@@ -25,8 +25,8 @@ Result
 -----
 |              | ogbl-vessel | ogbl-citation2 |
 |--------------|---------------------|-----------------------|
-| Val results | 82.55%&plusmn;0.40% | 89.48%&plusmn;0.08% | 
-| Test results | 82.49%&plusmn;0.41% | 89.57%&plusmn;0.10% |
+| Val results | 83.15%&plusmn;0.44% | 89.78%&plusmn;0.18% | 
+| Test results | 83.07%&plusmn;0.44% | 89.87%&plusmn;0.18% |
 
 Usages
 ------
@@ -34,7 +34,7 @@ Usages
 ### ogbl-vessel
 
 ```
-    python train.py --device 1 --dataset ogbl-vessel --num_hops 1 --use_feature --use_edge_weight --eval_steps 1 --epochs 10 --train_percent 100 --val_percent 100 --test_percent 100 --model DGCNNGraphormer --runs 1 --batch_size 256 --lr 0.0002 --num_workers 24 --sample_type 0 --use_num_spd --use_cnb_jac --use_cnb_aa --sortpool_k 115
+    python3 train.py --grpe_cross --device 0 --cmd_time ${cmd_time} --num_heads 8 --dataset ogbl-vessel --use_feature --use_feature_GT --use_edge_weight --epochs 20 --train_percent 100 --val_percent 100 --test_percent 100 --model DGCNNGraphormer --runs 10 --batch_size 256 --lr 0.0001 --num_workers 24 --dynamic_train --dynamic_val --dynamic_test --use_len_spd --use_num_spd --use_cnb_jac
 ```
 or
 ```
@@ -44,7 +44,7 @@ or
 ### ogbl-citation2
 
 ```
-    python train.py --grpe_cross --device 0 --num_heads 8 --dataset ogbl-citation2 --use_feature --use_feature_GT --use_edge_weight --epochs 15 --train_percent 8 --val_percent 4 --test_percent 1 --final_val_percent 100 --final_test_percent 100 --model SIEG --runs 10 --batch_size 64 --lr 2e-05 --num_workers 24 --sortpool_k 0.6 --dynamic_train --dynamic_val --dynamic_test --use_len_spd --use_num_spd --use_cnb_jac --use_cnb_aa
+    python3 train.py --ngnn_code --grpe_cross --device 0 --cmd_time ${cmd_time} --num_heads 8 --dataset ogbl-citation2 --use_feature --use_feature_GT --use_edge_weight --epochs 15 --train_percent 8 --val_percent 4 --test_percent 0.2 --model NGNNDGCNNGraphormer_noNeigFeat --runs 10 --batch_size 64 --lr 2e-05 --num_workers 24 --dynamic_train --dynamic_val --dynamic_test --use_len_spd --use_num_spd --use_cnb_jac --use_cnb_aa
 ```
 or
 ```

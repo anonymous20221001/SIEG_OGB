@@ -1,13 +1,3 @@
-#!/usr/bin/python
-#****************************************************************#
-# ScriptName: test_dataloader.py
-# Author: $SHTERM_REAL_USER@alibaba-inc.com
-# Create Date: 2022-02-20 11:38
-# Modify Author: $SHTERM_REAL_USER@alibaba-inc.com
-# Modify Date: 2022-03-15 12:07
-# Function: 
-#***************************************************************#
-
 import os, sys
 import pdb
 from copy import deepcopy
@@ -20,6 +10,8 @@ import torch
 from torch.utils.data import IterableDataset
 from torch_geometric.data import Data, Dataset, InMemoryDataset
 from torch_sparse import coalesce
+# from surel_gacc import run_sample, sjoin, run_walk
+# from rpe import get_link_subgraph_rpe
 
 from utils import *
 from timer_guard import TimerGuard
@@ -59,6 +51,14 @@ class SEALIterableDataset(IterableDataset):
         self.link_nodes = torch.unique(self.links)
         self.labels = torch.Tensor([1] * pos_edge.size(1) + [0] * neg_edge.size(1)).long()
 
+        self.num_edge_types = 1
+        self.max_len_rule = 3
+        self.num_rules = pow(self.num_edge_types*2, self.max_len_rule+1) - 2
+        depth_rules = []
+        for depth_rule in range(1, self.max_len_rule+1):
+            depth_rules += [depth_rule] * pow(self.num_edge_types*2, depth_rule)
+        self.depth_rules = torch.Tensor(depth_rules).long()
+
         if self.use_coalesce:  # compress mutli-edge into edge with weight
             self.data.edge_index, self.data.edge_weight = coalesce(
                 self.data.edge_index, self.data.edge_weight, 
@@ -72,6 +72,17 @@ class SEALIterableDataset(IterableDataset):
             (edge_weight, (self.data.edge_index[0], self.data.edge_index[1])), 
             shape=(self.data.num_nodes, self.data.num_nodes)
         )
+
+        # pair-wise coefficients
+        if directed:
+            cn_types = ['undirected', 'in', 'out', 's2o', 'o2s']
+        else:
+            cn_types = ['in']
+        #self.links_cn, _ = CN(self.A, self.links, cn_types=cn_types)
+        #self.links_jaccard, _ = Jaccard(self.A, self.links, cn_types=cn_types)
+        #self.links_aa, _ = AA(self.A, self.links, cn_types=cn_types)
+        #self.links_ra, _ = RA(self.A, self.links, cn_types=cn_types)
+
         if self.sample_type == 0:
             if self.directed:
                 self.A_csc = self.A.tocsc()
@@ -104,6 +115,34 @@ class SEALIterableDataset(IterableDataset):
             else:
                 self.adj_idc_t = None
 
+        # structural information
+        if self.directed:
+            A_undirected = ssp.csr_matrix((np.concatenate([edge_weight, edge_weight]), (np.concatenate([self.data.edge_index[0], self.data.edge_index[1]]), np.concatenate([self.data.edge_index[1], self.data.edge_index[0]]))), shape=(self.data.num_nodes, self.data.num_nodes))
+            degree_undirected = A_undirected.sum(axis=0).flatten().tolist()[0]
+            degree_in = self.A.sum(axis=0).flatten().tolist()[0]
+            degree_out = self.A.sum(axis=1).flatten().tolist()[0]
+            self.degree = torch.Tensor([degree_undirected, degree_in, degree_out]).long()
+        else:
+            degree_undirected = self.A.sum(axis=0).flatten().tolist()[0]
+            self.degree = torch.Tensor([degree_undirected]).long()
+
+        # random walk
+        self.num_walk = kwargs["num_walk"] if "num_walk" in kwargs else 200
+        self.num_step = kwargs["num_step"] if "num_step" in kwargs else 4
+        self.use_rpe = kwargs["use_rpe"] if "use_rpe" in kwargs else False
+        self.replacement = kwargs["replacement"] if "replacement" in kwargs else False
+        self.trackback = kwargs["trackback"] if "trackback" in kwargs else False
+
+        split_obsrv = True if self.split == 'train' and percent < 100 else False
+        #split_obsrv = False
+        if self.use_rpe:
+            A_obsrv = self.A.copy()
+            if split_obsrv:
+                A_obsrv[pos_edge[0].tolist(), pos_edge[1].tolist()] = 0
+                A_obsrv.eliminate_zeros()
+            self.A_obsrv_undir = A_obsrv + A_obsrv.T
+
+        # slice
         self.pos_num_sample = pos_edge.size()[1]
         self.neg_num_sample = neg_edge.size()[1]
         self.num_sample = self.pos_num_sample + self.neg_num_sample
@@ -129,7 +168,23 @@ class SEALIterableDataset(IterableDataset):
         
         self.dirname = os.path.join(self.root, self.processed_directory_names)
         if not os.path.exists(self.dirname):
+            print(f'mkdir {self.dirname}')
             os.makedirs(self.dirname)
+        elif os.path.isdir(self.dirname):
+            print(f'{self.dirname} has {len(os.listdir(self.dirname))} files')
+        else:
+            print(f'{self.dirname} exists but is not a directory', file=stderr)
+
+        self.save_struct = True
+        self.struct_dirname = f'{self.dirname}_struct'
+        if not os.path.exists(self.struct_dirname):
+            if self.save_struct:
+                print(f'mkdir {self.struct_dirname}')
+                os.makedirs(self.struct_dirname)
+        elif os.path.isdir(self.struct_dirname):
+            print(f'{self.struct_dirname} has {len(os.listdir(self.struct_dirname))} files')
+        else:
+            print(f'{self.struct_dirname} exists but is not a directory', file=stderr)
 
     @property
     def num_node_features(self) -> int:
@@ -188,44 +243,95 @@ class SEALIterableDataset(IterableDataset):
             #print(slice_id, len(slice_pts), slice_pts[slice_id])
             basename = 'slice{}_in_{}(sample{}-{}).pt'.format(str(slice_id).zfill(len(str(num_slice))), num_slice, slice_pts[slice_id], slice_pts[slice_id+1]-1)
             filename = os.path.join(self.dirname, basename)
+            #print('sample {}-{} in slice {}'.format(slice_pts[slice_id], slice_pts[slice_id+1], slice_id))
+            has_data_file = False
             if os.path.exists(filename):
-                #print(f'load ${filename}')
-                data_list, slices_list = torch.load(filename)
-                #print('sample {}-{} in slice {}'.format(slice_pts[slice_id], slice_pts[slice_id+1], slice_id))
+                #print(f'load {filename}')
+                try:
+                    #print(f'load {filename}')
+                    collate_data, slices_list = torch.load(filename)
+                    has_data_file = True
+                except:
+                    print(f'open {filename} failed', file=sys.stderr)
+            #else:
+            #    print(f'not found {filename}')
+            if self.preprocess_fn is not None:
+                struct_filename = os.path.join(self.struct_dirname, 'slice{}_in_{}(sample{}-{})_struct.pt'.format(str(slice_id).zfill(len(str(num_slice))), num_slice, slice_pts[slice_id], slice_pts[slice_id+1]-1))
+                has_struct_file = False
+                # pdb.set_trace()
+                if has_data_file:
+                    # if date file not exists, re-do sampling and preprocess
+                    if os.path.exists(struct_filename):
+                        #print(f'load {struct_filename}')
+                        try:
+                            collate_struct_data, struct_slices_list = torch.load(struct_filename)
+                            has_struct_file = True
+                        except:
+                            print(f'open {struct_filename} failed', file=sys.stderr)
+                    #else:
+                    #    print(f'not found {struct_filename}')
+                has_struct_file = False
+                struct_data_list = []
+                if not has_struct_file:
+                    struct_data_list = [[] for i in range(slice_pts[slice_id + 1] - slice_pts[slice_id])]
+            if has_data_file:
                 i_list = np.array([i for i in range(slice_pts[slice_id + 1] - slice_pts[slice_id])])
                 if self.shuffle:
                     np.random.seed()
                     perm = np.random.permutation(len(i_list))
                     i_list = np.array(i_list)[perm].tolist()
                 for i in i_list:
-                    data = Data()
-                    for key in data_list.keys:
-                        item, slices = data_list[key], slices_list[key]
-                        start, end = slices[i].item(), slices[i + 1].item()
-                        if torch.is_tensor(item):
-                            s = list(repeat(slice(None), item.dim()))
-                            cat_dim = data_list.__cat_dim__(key, item)
-                            if cat_dim is None:
-                                cat_dim = 0
-                            s[cat_dim] = slice(start, end)
-                        elif start + 1 == end:
-                            s = slices[start]
-                        else:
-                            s = slice(start, end)
-                        data[key] = item[s]
+                    data = self.get_data(collate_data, slices_list, i)
                     data.x = None if self.data.x is None else self.data.x[data.node_id, :]
+                    keys = data.keys
                     if self.preprocess_fn is not None:
-                        self.preprocess_fn(data, directed=self.directed)
+                        # pdb.set_trace()
+                        if not has_struct_file:
+                            self.preprocess_fn(data, directed=self.directed, degree=self.degree)
+                            if self.save_struct:
+                                struct_data = data.clone()
+                                #for key in keys:
+                                #    if key in struct_data.keys:
+                                #        del struct_data.key
+                                if 'x' in struct_data.keys:
+                                    del struct_data.x
+                                if 'edge_index' in struct_data.keys:
+                                    del struct_data.edge_index
+                                if 'edge_attrs' in struct_data.keys:
+                                    del struct_data.edge_attrs
+                                if 'y' in struct_data.keys:
+                                    del struct_data.y
+                                if 'edge_weight' in struct_data.keys:
+                                    del struct_data.edge_weight
+                                if 'node_id' in struct_data.keys:
+                                    del struct_data.node_id
+                                struct_data_list[i] = struct_data
+                        else:
+                            struct_data = self.get_data(collate_struct_data, struct_slices_list, i)
+                            # debug
+                            #self.preprocess_fn(data, directed=self.directed, degree=self.degree)
+                            #for key in struct_data.keys:
+                            #    print(key, (data[key] == struct_data[key]).all())
+                            for key in struct_data.keys:
+                                data[key] = struct_data[key].clone()
+
+                    if self.use_rpe:
+                        data.x_rpe = get_link_subgraph_rpe(data.node_id[0], data.node_id[1], data.node_id[2:].tolist(), self.A_obsrv_undir.indptr, self.A_obsrv_undir.indices, self.num_walk, self.num_step, replacement=self.replacement, trackback=self.trackback, nthread=0)
                     yield data
+                if self.preprocess_fn is not None and self.save_struct:
+                    if struct_data_list == []:
+                        continue
+                    if not has_struct_file:
+                        #print(f'save {struct_filename}')
+                        torch.save(self.collate(struct_data_list), struct_filename)
             else:
                 data_list = []
-                # print('sample {}-{} in slice {}'.format(slice_pts[slice_id], slice_pts[slice_id+1], slice_id))
                 idc = [idx for idx in range(slice_pts[slice_id], slice_pts[slice_id+1])]
                 # if self.shuffle:
                 #     np.random.seed(123)
                 #     perm = np.random.permutation(len(idc))
                 #     idc = np.array(idc)[perm].tolist()
-                for idx in idc:
+                for i, idx in enumerate(idc):
                     src, dst = self.links[idx].tolist()
                     y = self.labels[idx].tolist()
                     if self.sample_type == 0:
@@ -242,61 +348,109 @@ class SEALIterableDataset(IterableDataset):
                                              node_features=self.data.x,
                                              y=y, directed=self.directed, A_t=self.adj_idc_t)
                     data = construct_pyg_graph(*tmp, self.node_label)
-                    data_copy = deepcopy(data)
-                    if self.preprocess_fn is not None:
-                        self.preprocess_fn(data, directed=self.directed)
-                    yield data
+                    keys = data.keys
+                    data_copy = data.clone()
                     del data_copy.x
                     data_list.append(data_copy)
 
+                    if self.preprocess_fn is not None:
+                        self.preprocess_fn(data, directed=self.directed, degree=self.degree)
+                        struct_data = data.clone()
+                        #for key in keys:
+                        #    if key in struct_data.keys:
+                        #        del struct_data[key]
+                        if 'x' in struct_data.keys:
+                            del struct_data.x
+                        if 'edge_index' in struct_data.keys:
+                            del struct_data.edge_index
+                        if 'edge_attrs' in struct_data.keys:
+                            del struct_data.edge_attrs
+                        if 'y' in struct_data.keys:
+                            del struct_data.y
+                        if 'edge_weight' in struct_data.keys:
+                            del struct_data.edge_weight
+                        if 'node_id' in struct_data.keys:
+                            del struct_data.node_id
+                        struct_data_list[i] = struct_data
+
+                    if self.use_rpe:
+                        data.x_rpe = get_link_subgraph_rpe(data.node_id[0], data.node_id[1], data.node_id[2:].tolist(), self.A_obsrv_undir.indptr, self.A_obsrv_undir.indices, self.num_walk, self.num_step, replacement=self.replacement, trackback=self.trackback, nthread=0)
+                    yield data
+
                 if data_list == []:
                     continue
-                #print(f'save ${filename}')
+                #print(f'save {filename}')
                 torch.save(self.collate(data_list), filename)
+
+                if self.preprocess_fn is not None and self.save_struct:
+                    if struct_data_list == []:
+                        continue
+                    #print(f'save {struct_filename}')
+                    torch.save(self.collate(struct_data_list), struct_filename)
 
     @staticmethod
     def collate(data_list: List[Data]) -> Tuple[Data, Dict[str, torch.Tensor]]:
         r"""Collates a python list of data objects to the internal storage
         format of :class:`torch_geometric.data.InMemoryDataset`."""
         keys = data_list[0].keys
-        data = data_list[0].__class__()
+        collate_data = data_list[0].__class__()
 
         for key in keys:
-            data[key] = []
-        slices = {key: [0] for key in keys}
+            collate_data[key] = []
+        slices_list = {key: [0] for key in keys}
 
         for item, key in product(data_list, keys):
-            data[key].append(item[key])
+            collate_data[key].append(item[key])
             if isinstance(item[key], torch.Tensor) and item[key].dim() > 0:
                 cat_dim = item.__cat_dim__(key, item[key])
                 cat_dim = 0 if cat_dim is None else cat_dim
-                s = slices[key][-1] + item[key].size(cat_dim)
+                s = slices_list[key][-1] + item[key].size(cat_dim)
             else:
-                s = slices[key][-1] + 1
-            slices[key].append(s)
+                s = slices_list[key][-1] + 1
+            slices_list[key].append(s)
 
         if hasattr(data_list[0], '__num_nodes__'):
-            data.__num_nodes__ = []
+            collate_data.__num_nodes__ = []
             for item in data_list:
-                data.__num_nodes__.append(item.num_nodes)
+                collate_data.__num_nodes__.append(item.num_nodes)
 
         for key in keys:
             item = data_list[0][key]
             if isinstance(item, torch.Tensor) and len(data_list) > 1:
                 if item.dim() > 0:
-                    cat_dim = data.__cat_dim__(key, item)
+                    cat_dim = collate_data.__cat_dim__(key, item)
                     cat_dim = 0 if cat_dim is None else cat_dim
-                    data[key] = torch.cat(data[key], dim=cat_dim)
+                    collate_data[key] = torch.cat(collate_data[key], dim=cat_dim)
                 else:
-                    data[key] = torch.stack(data[key])
+                    collate_data[key] = torch.stack(collate_data[key])
             elif isinstance(item, torch.Tensor):  # Don't duplicate attributes...
-                data[key] = data[key][0]
+                collate_data[key] = collate_data[key][0]
             elif isinstance(item, int) or isinstance(item, float):
-                data[key] = torch.tensor(data[key])
+                collate_data[key] = torch.tensor(collate_data[key])
 
-            slices[key] = torch.tensor(slices[key], dtype=torch.long)
+            slices_list[key] = torch.tensor(slices_list[key], dtype=torch.long)
 
-        return data, slices
+        return collate_data, slices_list
+
+
+    @staticmethod
+    def get_data(collate_data, slices_list, i):
+        data = Data()
+        for key in collate_data.keys:
+            item, slices = collate_data[key], slices_list[key]
+            start, end = slices[i].item(), slices[i + 1].item()
+            if torch.is_tensor(item):
+                s = list(repeat(slice(None), item.dim()))
+                cat_dim = collate_data.__cat_dim__(key, item)
+                if cat_dim is None:
+                    cat_dim = 0
+                s[cat_dim] = slice(start, end)
+            elif start + 1 == end:
+                s = slices[start]
+            else:
+                s = slice(start, end)
+            data[key] = item[s]
+        return data
 
 
 class SEALDataset(InMemoryDataset):
@@ -317,6 +471,11 @@ class SEALDataset(InMemoryDataset):
         self.sample_type = kwargs["sample_type"] if "sample_type" in kwargs else 0
         self.preprocess_fn = kwargs["preprocess_fn"] if "preprocess_fn" in kwargs else None
         self.sizes = torch.Tensor([30 if max_nodes_per_hop is None else max_nodes_per_hop for i in range(num_hops)]).long()
+        self.num_walk = kwargs["num_walk"] if "num_walk" in kwargs else 200
+        self.num_step = kwargs["num_step"] if "num_step" in kwargs else 4
+        self.use_rpe = kwargs["use_rpe"] if "use_rpe" in kwargs else False
+        self.replacement = kwargs["replacement"] if "replacement" in kwargs else False
+        self.trackback = kwargs["trackback"] if "trackback" in kwargs else False
         super(SEALDataset, self).__init__(root)
         self.data, self.slices = torch.load(self.processed_paths[0])
 
@@ -384,10 +543,33 @@ class SEALDataset(InMemoryDataset):
                 neg_edge, A, self.adj_idc, self.sizes, self.__val__, self.data.x, 0,
                 self.num_hops, self.node_label, self.directed, self.adj_idc_t)
 
+        # structural information
+        if self.directed:
+            A_undirected = ssp.csr_matrix((np.concatenate([edge_weight, edge_weight]), (np.concatenate([self.data.edge_index[0], self.data.edge_index[1]]), np.concatenate([self.data.edge_index[1], self.data.edge_index[0]]))), shape=(self.data.num_nodes, self.data.num_nodes))
+            degree_undirected = A_undirected.sum(axis=0).flatten().tolist()[0]
+            degree_in = self.A.sum(axis=0).flatten().tolist()[0]
+            degree_out = self.A.sum(axis=1).flatten().tolist()[0]
+            self.degree = torch.Tensor([degree_undirected, degree_in, degree_out]).long()
+        else:
+            degree_undirected = self.A.sum(axis=0).flatten().tolist()[0]
+            self.degree = torch.Tensor([degree_undirected]).long()
+
+        # random walk
+        split_obsrv = True if self.split == 'train' and percent < 100 else False
+        #split_obsrv = False
+        if self.use_rpe:
+            A_obsrv = self.A.copy()
+            if split_obsrv:
+                A_obsrv[pos_edge[0].tolist(), pos_edge[1].tolist()] = 0
+                A_obsrv.eliminate_zeros()
+            self.A_obsrv_undir = A_obsrv + A_obsrv.T
+
         data_list = pos_list + neg_list
         if self.preprocess_fn is not None:
             for data in tqdm(data_list):
-                self.preprocess_fn(data, directed=self.directed)
+                self.preprocess_fn(data, directed=self.directed, degree=self.degree)
+            if self.use_rpe:
+                data.x_rpe = get_link_subgraph_rpe(data.node_id[0], data.node_id[1], data.node_id[2:].tolist(), self.A_obsrv_undir.indptr, self.A_obsrv_undir.indices, self.num_walk, self.num_step, replacement=self.replacement, trackback=self.trackback, nthread=0)
         torch.save(self.collate(data_list), self.processed_paths[0])
         del pos_list, neg_list, data_list
 
@@ -401,6 +583,7 @@ class SEALDynamicDataset(Dataset):
         #self.split_edge = split_edge
         self.num_hops = num_hops
         self.percent = percent
+        self.split = split
         self.use_coalesce = use_coalesce
         self.node_label = node_label
         self.ratio_per_hop = ratio_per_hop
@@ -463,6 +646,33 @@ class SEALDynamicDataset(Dataset):
             else:
                 self.adj_idc_t = None
 
+        # structural information
+        if self.directed:
+            A_undirected = ssp.csr_matrix((np.concatenate([edge_weight, edge_weight]), (np.concatenate([self.data.edge_index[0], self.data.edge_index[1]]), np.concatenate([self.data.edge_index[1], self.data.edge_index[0]]))), shape=(self.data.num_nodes, self.data.num_nodes))
+            degree_undirected = A_undirected.sum(axis=0).flatten().tolist()[0]
+            degree_in = self.A.sum(axis=0).flatten().tolist()[0]
+            degree_out = self.A.sum(axis=1).flatten().tolist()[0]
+            self.degree = torch.Tensor([degree_undirected, degree_in, degree_out]).long()
+        else:
+            degree_undirected = self.A.sum(axis=0).flatten().tolist()[0]
+            self.degree = torch.Tensor([degree_undirected]).long()
+
+        # random walk
+        self.num_walk = kwargs["num_walk"] if "num_walk" in kwargs else 200
+        self.num_step = kwargs["num_step"] if "num_step" in kwargs else 4
+        self.use_rpe = kwargs["use_rpe"] if "use_rpe" in kwargs else False
+        self.replacement = kwargs["replacement"] if "replacement" in kwargs else False
+        self.trackback = kwargs["trackback"] if "trackback" in kwargs else False
+        split_obsrv = True if self.split == 'train' and percent < 100 else False
+        #split_obsrv = False
+        if self.use_rpe:
+            A_obsrv = self.A.copy()
+            if split_obsrv:
+                A_obsrv[pos_edge[0].tolist(), pos_edge[1].tolist()] = 0
+                A_obsrv.eliminate_zeros()
+            self.A_obsrv_undir = A_obsrv + A_obsrv.T
+
+
         self.sizes = torch.Tensor([30 if max_nodes_per_hop is None else max_nodes_per_hop for i in range(num_hops)]).long()
 
     def __len__(self):
@@ -491,8 +701,12 @@ class SEALDynamicDataset(Dataset):
         #_, subgraph, _, _, _ = tmp
         #print(f"subgraph: num_nodes {subgraph.shape[0]}, num_edges {subgraph.size}")
         data = construct_pyg_graph(*tmp, self.node_label)
+        # import pdb; pdb.set_trace()
         if self.preprocess_fn is not None:
-            self.preprocess_fn(data, directed=self.directed)
+            self.preprocess_fn(data, directed=self.directed, degree=self.degree)
+        # import pdb; pdb.set_trace()
+        if self.use_rpe:
+            data.x_rpe = get_link_subgraph_rpe(data.node_id[0], data.node_id[1], data.node_id[2:].tolist(), self.A_obsrv_undir.indptr, self.A_obsrv_undir.indices, self.num_walk, self.num_step, replacement=self.replacement, trackback=self.trackback, nthread=0)
 
         return data
 

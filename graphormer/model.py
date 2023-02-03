@@ -1,6 +1,10 @@
+import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torch_geometric.nn import GCNConv
 from timer_guard import TimerGuard
+import pdb
 
 class FeedForwardNetwork(nn.Module):
     def __init__(self, hidden_size, ffn_size, dropout_rate):
@@ -160,7 +164,11 @@ class Graphormer(nn.Module):
         self.use_degree = use_degree
         self.gravity_type = gravity_type
         self.atom_encoder = nn.Linear(input_dim, hidden_dim)
-
+        # self.edge_encoder = nn.Embedding(64, num_heads, padding_idx=0)
+        # self.edge_type = edge_type
+        # if self.edge_type == 'multi_hop':
+        #    self.edge_dis_encoder = nn.Embedding(
+        #        40 * num_heads * num_heads, 1)
         if self.grpe_cross:  # 按grpe的特征交叉方式，需要query和key两套结构特征embedding
             if use_len_spd:
                 self.len_shortest_path_encoder_query = nn.Embedding(40, hidden_dim, padding_idx=0)
@@ -177,9 +185,12 @@ class Graphormer(nn.Module):
             if use_cnb_ra:
                 self.undir_ra_encoder_query = nn.Embedding(40, hidden_dim, padding_idx=0)
                 self.undir_ra_encoder_key = nn.Embedding(40, hidden_dim, padding_idx=0)
+            # 固定0，不可学习
             self.padding1 = nn.Parameter(torch.zeros(1, self.num_heads, 1, 1, self.att_size), requires_grad=False)
             self.padding2 = nn.Parameter(torch.zeros(1, self.num_heads, 1, 1, self.att_size), requires_grad=False)
-
+            # 随机初始化，可学习
+            # self.padding1 = nn.Parameter(torch.randn(1, num_heads, 1, 1, self.att_size))
+            # self.padding2 = nn.Parameter(torch.randn(1, num_heads, 1, 1, self.att_size))
         else:
             if use_len_spd:
                 self.len_shortest_path_encoder = nn.Embedding(40, num_heads, padding_idx=0)
@@ -221,7 +232,10 @@ class Graphormer(nn.Module):
             layer.reset_parameters()
         self.final_ln.reset_parameters()
         self.atom_encoder.reset_parameters()
-
+        # self.edge_encoder.reset_parameters()
+        # self.edge_type = edge_type
+        # if self.edge_type == 'multi_hop':
+        #    self.edge_dis_encoder.reset_parameters()
         if self.grpe_cross:
             if self.use_len_spd:
                 self.len_shortest_path_encoder_query.reset_parameters()
@@ -264,11 +278,11 @@ class Graphormer(nn.Module):
         # out_degree：图中节点的出度，形状为(n_graph, n_node)
         # edge_input：图中节点对之间的最短路径(限制最短路径最大跳数为multi_hop_max_dist)上的边的特征，形状为(n_graph, n_node, n_node, multi_hop_max_dist, n_edge_features)
         # attn_edge_type：图的边特征，形状为(n_graph, n_node, n_node, n_edge_features)
-        # pdb.set_trace()
-        device=data.edge_index.device
+        device = data.attn_bias.device
         x = data.x  # feature: [n_graph, n_head(2), num_feat]; z_emb: [n_graph, n_head(2), dim_hidden]
         attn_bias = data.attn_bias
-
+        # edge_input = data.edge_input
+        # graph_attn_bias
         # 添加虚拟节点表示全图特征表示，之后按照图中正常节点处理
         n_graph, n_node = x.size()[:2]
         graph_attn_bias = attn_bias.clone()
@@ -279,6 +293,8 @@ class Graphormer(nn.Module):
         # 空间编码,节点之间最短路径长度对应的可学习标量
         # [n_graph, n_node, n_node, n_head] -> [n_graph, n_head, n_node, n_node]
         spatial_pos_bias = torch.zeros([n_graph, self.num_heads, n_node, n_node], device=device)
+        spatial_pos_query = torch.zeros([n_graph, self.num_heads, n_node, n_node, self.att_size], device=device)
+        spatial_pos_key = torch.zeros([n_graph, self.num_heads, n_node, n_node, self.att_size], device=device)
 
         if self.grpe_cross:
             # [n_graph, n_node, n_node] -> [n_graph, n_head, n_node, n_node, att_size]

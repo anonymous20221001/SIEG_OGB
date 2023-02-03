@@ -1,4 +1,5 @@
 import math
+
 import torch
 import torch.nn.functional as F
 from dgl.nn import GraphConv, SortPooling
@@ -130,6 +131,123 @@ class DGCNN(torch.nn.Module):
                 )
             ]
         x = torch.cat(xs[1:], dim=-1)
+
+        # global pooling
+        x = self.sort_pool(g, x)
+        x = x.unsqueeze(1)  # [num_graphs, 1, k * hidden]
+        x = F.relu(self.conv1(x))
+        x = self.maxpool1d(x)
+        x = F.relu(self.conv2(x))
+        x = x.view(x.size(0), -1)  # [num_graphs, dense_dim]
+        if self.output_embedding: return x
+
+        # MLP.
+        x = F.relu(self.lin1(x))
+        x = F.dropout(x, p=0.5, training=self.training)
+        x = self.lin2(x)
+        return x
+
+class DGCNN_noNeigFeat(torch.nn.Module):  # 数据需有feature，输入FFN而不输入GCN
+    def __init__(
+        self,
+        hidden_channels,
+        num_layers,
+        max_z,
+        k,
+        feature_dim=0,
+        GNN=GraphConv,
+        NGNN=NGNN_GCNConv,
+        dropout=0.0,
+        ngnn_type="all",
+        num_ngnn_layers=1,
+        output_embedding=False
+    ):
+        super(DGCNN_noNeigFeat, self).__init__()
+        self.output_embedding = output_embedding
+        self.feature_dim = feature_dim
+        self.dropout = dropout
+
+        self.k = k
+        self.sort_pool = SortPooling(k=self.k)
+
+        self.max_z = max_z
+        self.z_embedding = Embedding(self.max_z, hidden_channels)
+
+        self.convs = ModuleList()
+        initial_channels = hidden_channels
+        assert self.feature_dim > 0
+        feat_channels = self.feature_dim
+        self.lin01 = Linear(feat_channels, hidden_channels)  # FFN单独编码feature
+        self.lin02 = Linear(num_layers * hidden_channels + 1 + hidden_channels, num_layers * hidden_channels + 1)  # 3*32+1+32, 3*32+1
+
+        self.num_ngnn_layers = num_ngnn_layers
+        if ngnn_type in ["input", "all"]:
+            self.convs.append(
+                NGNN(
+                    initial_channels,
+                    hidden_channels,
+                    hidden_channels,
+                    self.num_ngnn_layers,
+                )
+            )
+        else:
+            self.convs.append(GNN(initial_channels, hidden_channels))
+
+        if ngnn_type in ["hidden", "all"]:
+            for _ in range(0, num_layers - 1):
+                self.convs.append(
+                    NGNN(
+                        hidden_channels,
+                        hidden_channels,
+                        hidden_channels,
+                        self.num_ngnn_layers,
+                    )
+                )
+        else:
+            for _ in range(0, num_layers - 1):
+                self.convs.append(GNN(hidden_channels, hidden_channels))
+
+        if ngnn_type in ["output", "all"]:
+            self.convs.append(
+                NGNN(hidden_channels, hidden_channels, 1, self.num_ngnn_layers)
+            )
+        else:
+            self.convs.append(GNN(hidden_channels, 1))
+
+        conv1d_channels = [16, 32]
+        total_latent_dim = hidden_channels * num_layers + 1
+        conv1d_kws = [total_latent_dim, 5]
+        self.conv1 = Conv1d(1, conv1d_channels[0], conv1d_kws[0], conv1d_kws[0])
+        self.maxpool1d = MaxPool1d(2, 2)
+        self.conv2 = Conv1d(
+            conv1d_channels[0], conv1d_channels[1], conv1d_kws[1], 1
+        )
+        dense_dim = int((self.k - 2) / 2 + 1)
+        self.dense_dim = (dense_dim - conv1d_kws[1] + 1) * conv1d_channels[1]
+        self.lin1 = Linear(self.dense_dim, 128)
+        self.lin2 = Linear(128, 1)
+
+    def forward(self, g, z, x=None, edge_weight=None):
+        z_emb = self.z_embedding(z)
+        if z_emb.ndim == 3:  # in case z has multiple integer labels
+            z_emb = z_emb.sum(dim=1)
+        xs = [z_emb]
+        ffn_feat = x.to(torch.float)
+
+        for conv in self.convs:
+            xs += [
+                F.dropout(
+                    torch.tanh(conv(g, xs[-1], edge_weight=edge_weight)),
+                    p=self.dropout,
+                    training=self.training,
+                )
+            ]
+        x = torch.cat(xs[1:], dim=-1)
+
+        # linear -> concat -> linear
+        x_feature = F.relu(self.lin01(ffn_feat))  # FFN单独编码feature
+        x = torch.cat((x, x_feature), dim=1)
+        x = F.relu(self.lin02(x))
 
         # global pooling
         x = self.sort_pool(g, x)

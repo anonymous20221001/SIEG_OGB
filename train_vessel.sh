@@ -1,29 +1,13 @@
-#!/bin/sh
-#****************************************************************#
-# ScriptName: train_vessel.sh
-# Author: $SHTERM_REAL_USER@alibaba-inc.com
-# Create Date: 2022-01-13 15:13
-# Modify Author: $SHTERM_REAL_USER@alibaba-inc.com
-# Modify Date: 2022-03-15 11:58
-# Function: 
-#***************************************************************#
+cmd_time=`TZ=UTC-8 date  "+%Y%m%d-%H%M%S"`
 
-#export utils=True
-postfix=`TZ=UTC-8 date  "+%Y%m%d-%H%M%S"`
+# DGCNNGraphormer
+nohup python3 train.py --grpe_cross --device 0 --cmd_time ${cmd_time} --num_heads 8 --dataset ogbl-vessel --use_feature --use_feature_GT --use_edge_weight --epochs 20 --train_percent 100 --val_percent 100 --test_percent 100 --model DGCNNGraphormer --runs 10 --batch_size 256 --lr 0.0001 --num_workers 24 --dynamic_train --dynamic_val --dynamic_test --use_len_spd --use_num_spd --use_cnb_jac >> train_log/run_${cmd_time}.log 2>&1 &
 
-sample_type=0
-readout_type=0
-#readout_type=2
-train_per=100  # 2
-per=100  # 1 验证和测试
-epochs=10
-batch_size=256  # 128
-model=DGCNNGraphormer
-runs=1  # 10
-lr=0.0002
-#max_node=100
-max_node=-1
-num_workers=24
-sortpool_k=115
+# # DGCNNGraphormer_noNeigFeat lr0.0001
+# nohup python3 train.py --grpe_cross --device 0 --cmd_time ${cmd_time} --num_heads 8 --dataset ogbl-vessel --use_feature --use_feature_GT --use_edge_weight --epochs 20 --train_percent 100 --val_percent 100 --test_percent 100 --model DGCNNGraphormer_noNeigFeat --runs 10 --batch_size 256 --lr 0.0001 --num_workers 24 --dynamic_train --dynamic_val --dynamic_test --use_len_spd --use_num_spd --use_cnb_jac >> train_log/run_${cmd_time}.log 2>&1 &
 
-nohup python train.py --device 1 --dataset ogbl-vessel --num_hops 1 --use_feature --use_edge_weight --eval_steps 1 --epochs ${epochs} --train_percent ${train_per} --val_percent ${per} --test_percent ${per} --model ${model} --runs ${runs} --batch_size ${batch_size} --lr ${lr} --num_workers ${num_workers} --sample_type ${sample_type} --use_num_spd --use_cnb_jac --use_cnb_aa --sortpool_k ${sortpool_k} >> vessel_${model}_sampler${sample_type}_sortpoolk${sortpool_k}_b128_lr0.0002_run${runs}_${postfix}_`hostname`.log 2>&1 &
+# # DGL_NGNN
+# nohup python3 train.py --ngnn_code --device 0 --cmd_time ${cmd_time} --dataset ogbl-vessel --use_feature --use_edge_weight --epochs 15 --train_percent 100 --val_percent 100 --test_percent 100 --model DGCNN --runs 10 --batch_size 256 --lr 0.0001 --num_workers 24 --dynamic_train --dynamic_val --dynamic_test >> train_log/run_${cmd_time}.log 2>&1 &
+
+# # PYG_NGNN
+# nohup python3 train.py --use_ignn --device 1 --cmd_time ${cmd_time} --dataset ogbl-vessel --use_feature --use_edge_weight --epochs 15 --train_percent 100 --val_percent 100 --test_percent 100 --model DGCNN --runs 10 --batch_size 256 --lr 0.0001 --num_workers 24 --dynamic_train --dynamic_val --dynamic_test >> train_log/run_${cmd_time}.log 2>&1 &

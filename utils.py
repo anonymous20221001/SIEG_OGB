@@ -14,8 +14,8 @@ import torch_sparse
 from torch_sparse import spspmm, SparseTensor
 import torch_geometric
 from torch_geometric.data.sampler import Adj, EdgeIndex
-from torch_geometric.data import DataLoader
-from torch_geometric.data import Data
+from torch_geometric.data import DataLoader as PygDataLoader
+from torch_geometric.data import Data as PygData
 from torch_geometric.utils import (negative_sampling, add_self_loops,
                                    train_test_split_edges)
 from timer_guard import TimerGuard
@@ -272,7 +272,8 @@ def drnl_node_labeling(adj, src, dst):
     dist2dst = torch.from_numpy(dist2dst)
 
     dist = dist2src + dist2dst
-    dist_over_2, dist_mod_2 = dist // 2, dist % 2
+    # dist_over_2, dist_mod_2 = dist // 2, dist % 2
+    dist_over_2, dist_mod_2 = torch.div(dist, 2, rounding_mode='floor'), dist % 2
 
     z = 1 + torch.min(dist2src, dist2dst)
     z += dist_over_2 * (dist_over_2 + dist_mod_2 - 1)
@@ -350,9 +351,9 @@ def construct_pyg_graph(node_ids, adj, dists, node_features, y, node_label='drnl
         z[z>100] = 100  # limit the maximum label to 100
     else:
         z = torch.zeros(len(dists), dtype=torch.long)
-    data = Data(node_features, edge_index, edge_weight=edge_weight, y=y, z=z, 
+    data = PygData(node_features, edge_index, edge_weight=edge_weight, y=y, z=z, 
                 node_id=node_ids, num_nodes=num_nodes)
-    #data = Data(node_features, edge_index, edge_weight=edge_weight, y=y, z=z, 
+    #data = PygData(node_features, edge_index, edge_weight=edge_weight, y=y, z=z, 
     #            node_id=node_ids, num_nodes=num_nodes, adj=adj)
     return data
 
@@ -534,7 +535,7 @@ def CN(A, edge_index, batch_size=100000, cn_types=['in']):
         weights = np.array(A[x_ind, y_ind]).flatten()
         A_undirected = ssp.csr_matrix((np.concatenate([weights, weights]), (np.concatenate([x_ind, y_ind]), np.concatenate([y_ind, x_ind]))), shape=(num_nodes, num_nodes))
 
-    link_loader = DataLoader(range(edge_index.size(1)), batch_size)
+    link_loader = PygDataLoader(range(edge_index.size(1)), batch_size)
     multi_type_scores = []
     for cn_type in cn_types:
         scores = []
@@ -574,7 +575,7 @@ def Jaccard(A, edge_index, batch_size=100000, cn_types=['in']):
         A_undirected = ssp.csr_matrix((np.concatenate([weights, weights]), (np.concatenate([x_ind, y_ind]), np.concatenate([y_ind, x_ind]))), shape=(num_nodes, num_nodes))
         degree_undirected = A_undirected.sum(axis=0).getA1() # degree
 
-    link_loader = DataLoader(range(edge_index.size(1)), batch_size)
+    link_loader = PygDataLoader(range(edge_index.size(1)), batch_size)
     multi_type_scores = []
     for cn_type in cn_types:
         scores = []
@@ -629,7 +630,7 @@ def AA(A, edge_index, batch_size=100000, cn_types=['in']):
         A_undirected_div_log_deg = A_undirected.multiply(div_log_deg_multiplier_undirected).tocsr()
     A_t_undirected_div_log_deg = A_t.multiply(div_log_deg_multiplier_undirected).tocsr()
 
-    link_loader = DataLoader(range(edge_index.size(1)), batch_size)
+    link_loader = PygDataLoader(range(edge_index.size(1)), batch_size)
     multi_type_scores = []
     for cn_type in cn_types:
         scores = []
@@ -675,7 +676,7 @@ def RA(A, edge_index, batch_size=100000, cn_types=['in']):
     if 'undirected' in cn_types:
         A_undirected_div_deg = A_undirected.multiply(div_deg_multiplier_undirected).tocsr()
 
-    link_loader = DataLoader(range(edge_index.size(1)), batch_size)
+    link_loader = PygDataLoader(range(edge_index.size(1)), batch_size)
     multi_type_scores = []
     for cn_type in cn_types:
         scores = []
