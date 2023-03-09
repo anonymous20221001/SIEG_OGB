@@ -2,7 +2,7 @@ SIEG
 ===============================================================================
 
 
-Code for paper [**SIEG: Structural Information Enhanced Graph representation**](OGB_VESSEL_SIEG.pdf)
+Code for paper [**SIEG: Structural Information Enhanced Graph representation**](comming soon...)
 
 This implementation of PairRE for [**Open Graph Benchmak**](https://arxiv.org/abs/2005.00687) datasets (ogbl-wikikg and ogbl-biokg) is based on [**OGB**](https://github.com/snap-stanford/ogb). Thanks for their contributions.
 
