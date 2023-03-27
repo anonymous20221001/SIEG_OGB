@@ -1,3 +1,13 @@
+#!/usr/bin/python
+#****************************************************************#
+# ScriptName: test_dataloader.py
+# Author: $SHTERM_REAL_USER@alibaba-inc.com
+# Create Date: 2022-02-20 11:38
+# Modify Author: $SHTERM_REAL_USER@alibaba-inc.com
+# Modify Date: 2022-05-26 16:32
+# Function: 
+#***************************************************************#
+
 import os, sys
 import pdb
 from copy import deepcopy
@@ -593,6 +603,7 @@ class SEALDynamicDataset(Dataset):
         self.preprocess_fn = kwargs["preprocess_fn"] if "preprocess_fn" in kwargs else None
         super(SEALDynamicDataset, self).__init__(root)
 
+        # 对于not ogbl-dataset的情况，在之前的do_edge_split里做add_self_loops和negative_sampling，没使用，get_pos_neg_edges里重新计算了这俩
         pos_edge, neg_edge = get_pos_neg_edges(split, split_edge, 
                                                self.data.edge_index, 
                                                self.data.num_nodes, 
@@ -672,8 +683,8 @@ class SEALDynamicDataset(Dataset):
                 A_obsrv.eliminate_zeros()
             self.A_obsrv_undir = A_obsrv + A_obsrv.T
 
-
-        self.sizes = torch.Tensor([30 if max_nodes_per_hop is None else max_nodes_per_hop for i in range(num_hops)]).long()
+        if self.sample_type == 2:
+            self.sizes = torch.Tensor([30 if max_nodes_per_hop is None else max_nodes_per_hop for i in range(num_hops)]).long()
 
     def __len__(self):
         return self.links.size()[0]

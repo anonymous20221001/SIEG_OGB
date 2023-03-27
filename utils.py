@@ -114,8 +114,9 @@ def k_hop_subgraph(src: int, dst: int, num_hops: int, A: ssp.csr_matrix, sample_
         if sample_ratio < 1.0:
             fringe = random.sample(fringe, int(sample_ratio*len(fringe)))
         if max_nodes_per_hop is not None:
-            if max_nodes_per_hop < len(fringe):
-                fringe = random.sample(fringe, max_nodes_per_hop)
+            max_nodes_this_hop = max_nodes_per_hop[dist-1] if isinstance(max_nodes_per_hop, list) else max_nodes_per_hop
+            if max_nodes_this_hop < len(fringe):
+                fringe = random.sample(fringe, max_nodes_this_hop)
         if len(fringe) == 0:
             break
         nodes = nodes + list(fringe)
@@ -396,6 +397,7 @@ def do_edge_split(dataset, fast_split=False, val_ratio=0.05, test_ratio=0.1, neg
 
     if not fast_split:
         data = train_test_split_edges(data, val_ratio, test_ratio)
+        # edge_index和data.train_neg_edge_index后面没用，在get_pos_neg_edges里重新计算了这俩
         edge_index, _ = add_self_loops(data.train_pos_edge_index)
         data.train_neg_edge_index = negative_sampling(
             edge_index, num_nodes=data.num_nodes,
@@ -452,7 +454,8 @@ def get_dict_info(d):
 def get_pos_neg_edges(split, split_edge, edge_index, num_nodes, percent=100, neg_ratio=1):
     if 'edge' in split_edge['train']:
         pos_edge = split_edge[split]['edge'].t()
-        if split == 'train':
+        # if split == 'train':  # 非ogbl训练集本就有edge_neg，会重采样，应该不影响PubMed/Cora/CiteSeer结果
+        if 'edge_neg' not in split_edge[split]:
             new_edge_index, _ = add_self_loops(edge_index)
             neg_edge = negative_sampling(
                 new_edge_index, num_nodes=num_nodes,
@@ -530,9 +533,11 @@ def CN(A, edge_index, batch_size=100000, cn_types=['in']):
     num_nodes = A.shape[0]
     A_t = A.transpose().tocsr()
 
-    if 'undirected' in cn_types:
-        x_ind, y_ind = A.nonzero()
-        weights = np.array(A[x_ind, y_ind]).flatten()
+    x_ind, y_ind = A.nonzero()
+    weights = np.array(A[x_ind, y_ind]).flatten()
+    if (A.todense() == A_t.todense()).all():
+        A_undirected = A
+    else:
         A_undirected = ssp.csr_matrix((np.concatenate([weights, weights]), (np.concatenate([x_ind, y_ind]), np.concatenate([y_ind, x_ind]))), shape=(num_nodes, num_nodes))
 
     link_loader = PygDataLoader(range(edge_index.size(1)), batch_size)
@@ -569,11 +574,13 @@ def Jaccard(A, edge_index, batch_size=100000, cn_types=['in']):
     A_t = A.transpose().tocsr()
     degree_out = A_t.sum(axis=0).getA1()
 
-    if 'undirected' in cn_types:
-        x_ind, y_ind = A.nonzero()
-        weights = np.array(A[x_ind, y_ind]).flatten()
+    x_ind, y_ind = A.nonzero()
+    weights = np.array(A[x_ind, y_ind]).flatten()
+    if (A.todense() == A_t.todense()).all():
+        A_undirected = A
+    else:
         A_undirected = ssp.csr_matrix((np.concatenate([weights, weights]), (np.concatenate([x_ind, y_ind]), np.concatenate([y_ind, x_ind]))), shape=(num_nodes, num_nodes))
-        degree_undirected = A_undirected.sum(axis=0).getA1() # degree
+    degree_undirected = A_undirected.sum(axis=0).getA1() # degree
 
     link_loader = PygDataLoader(range(edge_index.size(1)), batch_size)
     multi_type_scores = []
@@ -623,7 +630,10 @@ def AA(A, edge_index, batch_size=100000, cn_types=['in']):
 
     x_ind, y_ind = A.nonzero()
     weights = np.array(A[x_ind, y_ind]).flatten()
-    A_undirected = ssp.csr_matrix((np.concatenate([weights, weights]), (np.concatenate([x_ind, y_ind]), np.concatenate([y_ind, x_ind]))), shape=(num_nodes, num_nodes))
+    if (A.todense() == A_t.todense()).all():
+        A_undirected = A
+    else:
+        A_undirected = ssp.csr_matrix((np.concatenate([weights, weights]), (np.concatenate([x_ind, y_ind]), np.concatenate([y_ind, x_ind]))), shape=(num_nodes, num_nodes))
     div_log_deg_multiplier_undirected = 1 / np.log(A_undirected.sum(axis=0)) # degree
     div_log_deg_multiplier_undirected[np.isinf(div_log_deg_multiplier_undirected)] = 2.0
     if 'undirected' in cn_types:
@@ -670,7 +680,10 @@ def RA(A, edge_index, batch_size=100000, cn_types=['in']):
 
     x_ind, y_ind = A.nonzero()
     weights = np.array(A[x_ind, y_ind]).flatten()
-    A_undirected = ssp.csr_matrix((np.concatenate([weights, weights]), (np.concatenate([x_ind, y_ind]), np.concatenate([y_ind, x_ind]))), shape=(num_nodes, num_nodes))
+    if (A.todense() == A_t.todense()).all():
+        A_undirected = A
+    else:
+        A_undirected = ssp.csr_matrix((np.concatenate([weights, weights]), (np.concatenate([x_ind, y_ind]), np.concatenate([y_ind, x_ind]))), shape=(num_nodes, num_nodes))
     div_deg_multiplier_undirected = 1 / A_undirected.sum(axis=0) # degree
     div_deg_multiplier_undirected[np.isinf(div_deg_multiplier_undirected)] = 0.0
     if 'undirected' in cn_types:

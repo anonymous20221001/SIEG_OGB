@@ -205,6 +205,7 @@ class Graphormer(nn.Module):
         if use_degree:  # 点上的特征不需要两套
             self.in_degree_encoder = nn.Embedding(64, hidden_dim, padding_idx=0)
             self.out_degree_encoder = nn.Embedding(64, hidden_dim, padding_idx=0)
+            self.undir_degree_encoder = nn.Embedding(64, hidden_dim, padding_idx=0)
 
         num_edge_types = 1
         max_len_rule = 3
@@ -268,6 +269,7 @@ class Graphormer(nn.Module):
         if self.use_degree:
             self.in_degree_encoder.reset_parameters()
             self.out_degree_encoder.reset_parameters()
+            self.undir_degree_encoder.reset_parameters()
 
     @TimerGuard('forward', 'utils')
     def forward(self, data, perturb=None):
@@ -362,15 +364,20 @@ class Graphormer(nn.Module):
         graph_attn_bias = graph_attn_bias + attn_bias.unsqueeze(1)  # reset
 
         # node feauture + graph token
+        x = x.to(torch.float32)
         node_feature = self.atom_encoder(x)           # [n_graph, n_node, n_hidden]
 
         # 根据节点的入度、出度为每个节点分配两个实值嵌入向量，添加到节点特征中作为输入
         if self.use_degree:
-            in_degree = torch.clamp(data.in_degree, min=0, max=63).long()
-            out_degree = torch.clamp(data.out_degree, min=0, max=63).long()
-            node_feature = node_feature + \
-                self.in_degree_encoder(in_degree) + \
-                self.out_degree_encoder(out_degree)
+            if hasattr(data, 'in_degree'):
+                in_degree = torch.clamp(data.in_degree, min=0, max=63).long()
+                out_degree = torch.clamp(data.out_degree, min=0, max=63).long()
+                node_feature = node_feature + \
+                    self.in_degree_encoder(in_degree) + \
+                    self.out_degree_encoder(out_degree)
+            else:
+                undir_degree = torch.clamp(data.undir_degree, min=0, max=63).long()
+                node_feature = node_feature + self.undir_degree_encoder(undir_degree)
         graph_token_feature = self.graph_token.weight.unsqueeze(
             0).repeat(n_graph, 1, 1)
         graph_node_feature = torch.cat(

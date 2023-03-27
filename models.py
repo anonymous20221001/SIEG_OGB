@@ -1131,7 +1131,7 @@ class DGCNNGraphormer(torch.nn.Module):
                             conv1d_kws[1], 1)
         dense_dim = int((self.k - 2) / 2 + 1)
         dense_dim = (dense_dim - conv1d_kws[1] + 1) * conv1d_channels[1]
-        mlp_hidden_channels = 128
+        mlp_hidden_channels = args.mlp_hidden_channels
         self.lin_align = Linear(dense_dim, mlp_hidden_channels)
         if self.readout_type == 0:
             self.lin1 = Linear(2*mlp_hidden_channels, mlp_hidden_channels)
@@ -1301,7 +1301,7 @@ class DGCNNGraphormer_noNeigFeat(torch.nn.Module):
                             conv1d_kws[1], 1)
         dense_dim = int((self.k - 2) / 2 + 1)
         dense_dim = (dense_dim - conv1d_kws[1] + 1) * conv1d_channels[1]
-        mlp_hidden_channels = 128
+        mlp_hidden_channels = args.mlp_hidden_channels
         self.lin_align = Linear(dense_dim, mlp_hidden_channels)
         if self.readout_type == 0:
             self.lin1 = Linear(2*mlp_hidden_channels, mlp_hidden_channels)
@@ -1430,7 +1430,7 @@ class NGNNDGCNNGraphormer(torch.nn.Module):
                 output_embedding=True
             )
 
-        mlp_hidden_channels = 128
+        mlp_hidden_channels = args.mlp_hidden_channels
         dense_dim = self.ngnndgcnn.dense_dim
         self.lin_align = Linear(dense_dim, mlp_hidden_channels)
         if self.readout_type == 0:
@@ -1515,7 +1515,7 @@ class NGNNDGCNNGraphormer_noNeigFeat(torch.nn.Module):
                 output_embedding=True
             )
 
-        mlp_hidden_channels = 128
+        mlp_hidden_channels = args.mlp_hidden_channels
         dense_dim = self.ngnndgcnn_noneigfeat.dense_dim
         self.lin_align = Linear(dense_dim, mlp_hidden_channels)
         if self.readout_type == 0:

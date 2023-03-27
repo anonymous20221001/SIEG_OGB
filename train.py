@@ -23,6 +23,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data import IterableDataset
 
 import torch_geometric.transforms as T
+from torch_geometric.data import Data
 from torch_geometric.data import DataLoader as PygDataLoader
 from torch_geometric.utils import to_networkx, to_undirected
 
@@ -64,6 +65,24 @@ from tqdm import tqdm
 
 import ngnn_models
 import ngnn_utils
+import wp_utils
+import seal18_utils
+
+# wp type
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+def str2none(v):
+    if v.lower()=='none':
+        return None
+    else:
+        return str(v)
 
 # ngnn dataset
 class SEALOGBLDataset(Dataset):
@@ -111,6 +130,7 @@ class SEALOGBLDataset(Dataset):
             self.g_list, tensor_dict = self.load_cached()
             self.labels = tensor_dict["y"]
 
+        # import pdb; pdb.set_trace()
         # compute degree from dataset_pyg
         if 'Graphormer' in args.model:
             if 'edge_weight' in data_pyg:
@@ -147,6 +167,7 @@ class SEALOGBLDataset(Dataset):
             src, dst, 1, self.graph, self.ratio_per_hop, self.directed
         )
 
+        # import pdb; pdb.set_trace()
         # Remove the link between src and dst.
         direct_links = [[], []]
         for s, t in [(0, 1), (1, 0)]:
@@ -182,6 +203,7 @@ class SEALOGBLDataset(Dataset):
             if self.preprocess_fn is not None:
                 self.preprocess_fn(subg, directed=self.directed, degree=self.degree)
 
+        # import pdb; pdb.set_trace()
         return subg_aug, z, x, edge_weights, y, subg
 
     @property
@@ -228,6 +250,7 @@ def train(num_datas):
             g, z, x, edge_weights, y = [
                 item.to(device) if item is not None else None for item in data
             ]
+            # import pdb; pdb.set_trace()
             # g.to(device)没法把这些pairwise结构属性to(device)，只能手动一下
             if 'Graphormer' in args.model:
                 g.attn_bias = g.attn_bias.to(device)
@@ -298,6 +321,7 @@ def test_model(model, loader, num_datas):
 
     y_pred, y_true = torch.zeros([num_datas]), torch.zeros([num_datas])
     start = 0
+    x_srcs, x_dsts = [], []
     for data in tqdm(loader, ncols=70):
         if args.ngnn_code:  # ngnn_code
             g, z, x, edge_weights, y = [
@@ -348,6 +372,23 @@ def test_model(model, loader, num_datas):
             y_pred[start:end] = logits.view(-1).cpu()
             y_true[start:end] = data.y.view(-1).cpu().to(torch.float)
             start = end
+
+        if args.output_logits and loader == final_test_loader:
+            _, center_indices = np.unique(data.batch.cpu().numpy(), return_index=True)
+            x_srcs += data.node_id[center_indices].tolist()
+            x_dsts += data.node_id[center_indices+1].tolist()
+    if args.output_logits and loader == final_test_loader:
+        logits_file = log_file.replace('log.txt', 'logits.txt')
+        with open(logits_file, 'a') as f:
+            print(f'x_src: (len:{len(x_srcs)})', file=f)
+            print(x_srcs, file=f)
+            print(f'x_dst: (len:{len(x_dsts)})', file=f)
+            print(x_dsts, file=f)
+            print(f'y_pred: (len:{len(y_pred.tolist())})', file=f)
+            print(y_pred.tolist(), file=f)
+            print(f'y_true: (len:{len(y_true.tolist())})', file=f)
+            print(y_true.tolist(), file=f)
+
     pos_test_pred = y_pred[y_true==1]
     neg_test_pred = y_pred[y_true==0]
     return y_pred, y_true, pos_test_pred, neg_test_pred
@@ -524,7 +565,7 @@ def eval_multiple_models(num_models, **kwargs):
 
 def evaluate_hits(pos_val_pred, neg_val_pred, pos_test_pred, neg_test_pred):
     results = {}
-    for K in [20, 50, 100]:
+    for K in args.eval_hits_K:
         evaluator.K = K
         valid_hits = evaluator.eval({
             'y_pred_pos': pos_val_pred,
@@ -574,6 +615,7 @@ def evaluate_auc(val_pred, val_true, test_pred, test_true):
 
 # Data settings
 parser = argparse.ArgumentParser(description='OGBL (SEAL)')
+parser.add_argument('--seed', type=int, default=None)
 parser.add_argument('--cmd_time', type=str, default='ignore_time')
 parser.add_argument('--root', type=str, default='dataset',
                     help="root of dataset")
@@ -585,13 +627,14 @@ parser.add_argument('--model', type=str, default='DGCNN')
 parser.add_argument('--sortpool_k', type=float, default=0.6)
 parser.add_argument('--num_layers', type=int, default=3)
 parser.add_argument('--hidden_channels', type=int, default=32)
+parser.add_argument('--mlp_hidden_channels', type=int, default=128)
 parser.add_argument('--batch_size', type=int, default=32)
 
 # Subgraph extraction settings
 parser.add_argument('--sample_type', type=int, default=0)
 parser.add_argument('--num_hops', type=int, default=1)
 parser.add_argument('--ratio_per_hop', type=float, default=1.0)
-parser.add_argument('--max_nodes_per_hop', type=int, default=None)
+parser.add_argument('--max_nodes_per_hop', type=int, nargs='+', default=None)
 parser.add_argument('--node_label', type=str, default='drnl', 
                     help="which specific labeling trick to use")
 parser.add_argument('--use_feature', action='store_true',
@@ -642,10 +685,15 @@ parser.add_argument('--save_appendix', type=str, default='',
                     help="an appendix to the save directory")
 parser.add_argument('--keep_old', action='store_true', 
                     help="do not overwrite old files in the save directory")
-parser.add_argument('--continue_from', type=int, default=None, 
-                    help="from which epoch's checkpoint to continue training")
+parser.add_argument('--continue_from', type=int, nargs='*', default=None, 
+                    help="from which run and epoch checkpoint to continue training")
+parser.add_argument('--part_continue_from', type=int, nargs='*', default=None, 
+                    help="from which run and epoch checkpoint to continue training")
+parser.add_argument('--output_logits', action='store_true')
 parser.add_argument('--only_test', action='store_true', 
                     help="only test without training")
+parser.add_argument('--only_final_test', action='store_true', 
+                    help="only final test without training")
 parser.add_argument('--test_multiple_models', type=str, nargs='+', default=[], 
                     help="test multiple models together")
 parser.add_argument('--use_heuristic', type=str, default=None,
@@ -693,10 +741,61 @@ parser.add_argument(
     help="hits@K for each eval step; " \
             "only available for datasets with hits@xx as the eval metric",
 )
+
+# wp_args
+parser.add_argument('--wp_code', action='store_true', default=False)
+parser.add_argument('--test-ratio', type=float, default=0.1,
+                    help='ratio of test links')
+parser.add_argument('--val-ratio', type=float, default=0.05,
+                    help='ratio of validation links. If using the splitted data from SEAL,\
+                     it is the ratio on the observed links, othewise, it is the ratio on the whole links.')
+parser.add_argument('--practical-neg-sample', type=bool, default = False,
+                    help='only see the train positive edges when sampling negative')
+parser.add_argument('--wp-seed', type=int, default=1)
+parser.add_argument('--drnl', type=str2bool, default=False,
+                    help='whether to use drnl labeling')
+parser.add_argument('--data-split-num',type=str, default='10',
+                    help='If use-splitted is true, choose one of splitted data')
+parser.add_argument('--observe-val-and-injection', type=str2bool, default = True,
+                    help='whether to contain the validation set in the observed graph and apply injection trick')
+parser.add_argument('--init-attribute', type=str2none, default='ones',
+                    help='initial attribute for graphs without node attributes\
+                    , options: n2v, one_hot, spc, ones, zeros, None')
+parser.add_argument('--init-representation', type=str2none, default= None,
+                    help='options: gic, vgae, argva, None')
+parser.add_argument('--use-splitted', type=str2bool, default=True,
+                    help='use the pre-splitted train/test data,\
+                     if False, then make a random division')
+parser.add_argument('--embedding-dim', type=int, default= 32,
+                    help='Dimension of the initial node representation, default: 32)')
+
+
+# seal18_args
+parser.add_argument('--seal18_code', action='store_true', default=False)
+parser.add_argument('--train-name', type=str, default=None)
+parser.add_argument('--test-name', type=str, default=None)
+parser.add_argument('--max-train-num', type=int, default=100000, 
+                    help='set maximum number of train links (to fit into memory)')
+
 args = parser.parse_args()
 
-if args.max_nodes_per_hop is not None:
-    args.max_nodes_per_hop = None if args.max_nodes_per_hop < 0 else args.max_nodes_per_hop
+
+def seed_torch(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    dgl.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+if args.seed is not None: seed_torch(args.seed)
+
+if args.max_nodes_per_hop is not None and len(args.max_nodes_per_hop) == 1:
+    args.max_nodes_per_hop = args.max_nodes_per_hop[0]
+# if args.max_nodes_per_hop is not None:
+#     args.max_nodes_per_hop = None if args.max_nodes_per_hop < 0 else args.max_nodes_per_hop
 if args.save_appendix == '':
     args.save_appendix = '_' + time.strftime("%Y%m%d%H%M%S")
 if args.data_appendix == '':
@@ -762,9 +861,7 @@ if args.dataset.startswith('ogbl'):
     evaluator = Evaluator(name=args.dataset)
 if args.eval_metric == 'hits':
     loggers = {
-        'Hits@20': Logger(args.runs, args),
-        'Hits@50': Logger(args.runs, args),
-        'Hits@100': Logger(args.runs, args),
+        f"Hits@{k}": Logger(args.runs, args) for k in args.eval_hits_K
     }
 elif args.eval_metric == 'mrr':
     loggers = {
@@ -848,16 +945,77 @@ preprocess_fn = partial(preprocess_func,
                         gravity_type=args.gravity_type,
                 )  if args.model.find('Graphormer') != -1 else None
 
-if not args.ngnn_code:  # sieg_code
-    if args.dataset.startswith('ogbl'):
-        dataset = PygLinkPropPredDataset(name=args.dataset, root=args.root)
-        split_edge = dataset.get_edge_split()
-        data = dataset[0]
-    else:  # not ogbl-dataset:
-        dataset = Planetoid(root='dataset', name=args.dataset)
-        split_edge = do_edge_split(dataset, args.fast_split)
-        data = dataset[0]
-        data.edge_index = split_edge['train']['edge'].t()
+if not args.ngnn_code:
+    if args.wp_code:
+        if args.dataset in ('cora', 'citeseer','pubmed'):
+            args.use_splitted = False
+            args.practical_neg_sample = True
+            args.observe_val_and_injection = False
+            args.init_attribute=None
+        if (args.dataset in ('Ecoli','PB','pubmed')) and (args.max_nodes_per_hop==None):
+            args.max_nodes_per_hop=100
+        if args.dataset=='Power':
+            args.num_hops=3
+
+        data = wp_utils.load_splitted_data(args)
+        # data = wp_utils.load_unsplitted_data(args)
+        # import pdb; pdb.set_trace()
+        data_observed, feature_results = wp_utils.set_init_attribute_representation(data, args)
+        # PB:
+        # data: Data(test_neg=[2, 1671], test_pos=[2, 1671], train_neg=[2, 14291], train_pos=[2, 14291], val_neg=[2, 752], val_pos=[2, 752])
+        # data_observed: Data(edge_index=[2, 30086], x=[1223, 32])
+        # edge_index: train_pos&val_pos bidirectional edge, x: x = torch.ones(data.num_nodes,args.embedding_dim).float()
+        # feature_results: None
+        # data.num_edges: None, data.num_features: 0, data.num_nodes: tensor(1223), data.num_node_features: 0
+        data.edge_index = torch.cat([data.train_pos, data.val_pos, data.test_pos], dim=1)
+        data.x = data_observed.x
+        data.num_nodes = data.num_nodes.item()
+        split_edge = {'train': {'edge': data.train_pos.t(), 'edge_neg': data.train_neg.t()},
+                      'valid': {'edge': data.val_pos.t(), 'edge_neg': data.val_neg.t()},
+                      'test': {'edge': data.test_pos.t(), 'edge_neg': data.test_neg.t()}}
+        # directed现在是默认False，确认一下
+    # import pdb; pdb.set_trace()
+
+    elif args.seal18_code:
+        train_pos, train_neg, test_pos, test_neg = seal18_utils.seal18_prepare_data(args)
+        train_pos = torch.cat([torch.from_numpy(train_pos[0]).unsqueeze(0),
+                               torch.from_numpy(train_pos[1]).unsqueeze(0)], dim=0)
+        train_neg = torch.cat([torch.Tensor(train_neg[0]).unsqueeze(0),
+                               torch.Tensor(train_neg[1]).unsqueeze(0)], dim=0)
+        test_pos = torch.cat([torch.from_numpy(test_pos[0]).unsqueeze(0),
+                               torch.from_numpy(test_pos[1]).unsqueeze(0)], dim=0)
+        test_neg = torch.cat([torch.Tensor(test_neg[0]).unsqueeze(0),
+                               torch.Tensor(test_neg[1]).unsqueeze(0)], dim=0)
+        val_num = int(0.1 * train_pos.shape[1])  # seal18是采好子图再拆分验证集
+        val_pos = train_pos[:, :val_num]
+        train_pos = train_pos[:, val_num:]
+        val_neg = train_neg[:, :val_num]
+        train_neg = train_neg[:, val_num:]
+        # print(train_pos.shape, train_neg.shape, val_pos.shape, val_neg.shape, test_pos.shape, test_neg.shape)
+        data = Data()
+        data.edge_index = torch.cat([train_pos, val_pos, test_pos], dim=1)
+        data.x = None
+        data.num_nodes = (max(torch.max(train_pos), torch.max(val_pos), torch.max(test_pos)) + 1).item()
+        split_edge = {'train': {'edge': train_pos.t(), 'edge_neg': train_neg.t()},
+                      'valid': {'edge': val_pos.t(), 'edge_neg': val_neg.t()},
+                      'test': {'edge': test_pos.t(), 'edge_neg': test_neg.t()}}
+        # import pdb; pdb.set_trace()
+
+    else:  # sieg_code
+        if args.dataset.startswith('ogbl'):
+            dataset = PygLinkPropPredDataset(name=args.dataset, root=args.root)
+            split_edge = dataset.get_edge_split()
+            data = dataset[0]
+        else:  # not ogbl-dataset (Planetoid):
+            dataset = Planetoid(root='dataset', name=args.dataset)
+            split_edge = do_edge_split(dataset, args.fast_split)
+            data = dataset[0]
+            data.edge_index = split_edge['train']['edge'].t()
+            # PubMed:
+            # Data(edge_index=[2, 75352], test_mask=[19717], train_mask=[19717], val_mask=[19717], x=[19717, 500], y=[19717])
+            # whole graph edges: 75352; whole graph num_nodes: 19717
+            # data.num_edges: 75352, data.num_features: 500, data.num_nodes: 19717, data.num_node_features: 500
+            # split_edge: {'train': {'edge': tensor([[0, 1378],...]), 'edge_neg': tensor}, 'valid': {'edge': tensor, 'edge_neg': tensor}, 'test': {'edge': tensor, 'edge_neg': tensor}}
 
     if args.use_valedges_as_input:
         val_edge_index = split_edge['valid']['edge'].t()
@@ -871,8 +1029,14 @@ if not args.ngnn_code:  # sieg_code
     print(f'data {data}')
     # import pdb; pdb.set_trace()
 
-    # SEAL.
-    path = dataset.root + '_seal{}'.format(args.data_appendix)  # sieg
+    if args.wp_code:
+        wp_root = os.path.join(root_dir, 'wp_data/splitted/{}'.format(args.dataset))
+        path = wp_root + '_seal{}'.format(args.data_appendix)
+    elif args.seal18_code:
+        seal18_root = os.path.join(root_dir, 'seal18_data/{}'.format(args.dataset))
+        path = seal18_root + '_seal{}'.format(args.data_appendix)
+    else:
+        path = dataset.root + '_seal{}'.format(args.data_appendix)  # sieg
     print(f'path {path}')
     use_coalesce = True if args.dataset == 'ogbl-collab' else False
     #if not args.dynamic_train and not args.dynamic_val and not args.dynamic_test:
@@ -1041,7 +1205,7 @@ if not args.ngnn_code:  # sieg_code
                                 num_workers=args.num_workers)
     # import pdb; pdb.set_trace()
 
-else:  # ngnn_code
+elif args.ngnn_code:
     dataset = DglLinkPropPredDataset(name=args.dataset)
     split_edge = dataset.get_edge_split()
     graph = dataset[0]
@@ -1134,6 +1298,7 @@ else:  # ngnn_code
 
     def ogbl_collate_fn(batch):
         gs, zs, xs, ws, ys, g_noaugs = zip(*batch)
+        # import pdb; pdb.set_trace()
         batched_g = dgl.batch(gs)
         z = torch.cat(zs, dim=0)
         if xs[0] is not None:
@@ -1345,7 +1510,7 @@ for run in range(args.runs):
     localtime = time.asctime(time.localtime(time.time()))
     print(f'{localtime} Total number of parameters is {total_params}')
     if args.model.find('DGCNN') != -1:
-        print(f'SortPooling k is set to {model_k}')
+        print(f'SortPooling k is set to {model.k}')
     with open(log_file, 'a') as f:
         print(f'Total number of parameters is {total_params}', file=f)
         if args.model.find('DGCNN') != -1:
@@ -1355,15 +1520,26 @@ for run in range(args.runs):
     if args.continue_from is not None:
         model.load_state_dict(
             torch.load(os.path.join(args.res_dir, 
-                'run{}_model_checkpoint{}.pth'.format(run+1, args.continue_from)))
+                'run{}_model_checkpoint{}.pth'.format(args.continue_from[0], args.continue_from[-1])))
         )
-        optimizer.load_state_dict(
+        if not args.only_final_test:
+            optimizer.load_state_dict(
+                torch.load(os.path.join(args.res_dir, 
+                    'run{}_optimizer_checkpoint{}.pth'.format(args.continue_from[0], args.continue_from[-1])))
+            )
+            start_epoch = args.continue_from[-1] + 1
+            # args.epochs -= args.continue_from
+
+    if args.part_continue_from is not None:  # stage2 training
+        model.ngnndgcnn.load_state_dict(
             torch.load(os.path.join(args.res_dir, 
-                'run{}_optimizer_checkpoint{}.pth'.format(run+1, args.continue_from)))
+                'run{}_model_checkpoint{}.pth'.format(args.part_continue_from[0], args.part_continue_from[-1])))
         )
-        start_epoch = args.continue_from + 1
-        args.epochs -= args.continue_from
-    
+        for p in model.ngnndgcnn.parameters(): p.requires_grad = False
+        optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=2)
+        start_epoch = 1001  # stage2的模型从1001开始
+
     if args.only_test:
         results = test(args.eval_metric)
         for key, result in results.items():
@@ -1375,6 +1551,26 @@ for run in range(args.runs):
             print(f'[{localtime}] Run: {run + 1:02d}, '
                   f'[{localtime}] Valid: {100 * valid_res:.2f}%, '
                   f'[{localtime}] Test: {100 * test_res:.2f}%')
+        # pdb.set_trace()
+        exit()
+
+    if args.only_final_test:  # need continue_from
+        results = final_test(args.eval_metric)
+        for key in loggers.keys():
+            result = results[key]
+        final_valid_str = []
+        final_test_str = []
+        for key, result in results.items():
+            final_valid_res, final_test_res = result
+            final_valid_str.append(f'{key} {100 * final_valid_res:.2f}%')
+            final_test_str.append(f'{key} {100 * final_test_res:.2f}%')
+
+        to_print = (f'Run: {args.continue_from[0]:02d}, Epoch: {args.continue_from[-1]}, ' +
+                    f'Final Valid: {", ".join(final_valid_str)}, ' +
+                    f'Final Test: {", ".join(final_test_str)}')
+        print(f'{to_print}')
+        with open(log_file, 'a') as f:
+            print(to_print, file=f)
         # pdb.set_trace()
         exit()
 
@@ -1444,6 +1640,7 @@ for run in range(args.runs):
 
     # Training starts
     for epoch in range(start_epoch, start_epoch + args.epochs):
+        # import pdb; pdb.set_trace()
         loss, train_result = train(len(train_dataset))  # {'AUC': 0.9661961285501943}
 
         if epoch % args.eval_steps == 0:
@@ -1481,11 +1678,29 @@ for run in range(args.runs):
                     print(to_print, file=f)
 
     # choose the best model in valid for final_valid and final_test
-    for key in loggers.keys():
-        res = torch.tensor([val_test[0] for val_test in loggers[key].results[run]])
-    idx_to_test = (
-        torch.topk(res, 1, largest=True).indices + 1
-    ).tolist()  # indices of top 1 valid results
+    if len(loggers.keys()) > 1:
+        candidate_idxs, candidate_results = [], []
+        for key in loggers.keys():
+            res = torch.tensor([val_test[0] for val_test in loggers[key].results[run]])
+            candidate_idxs += (torch.topk(res, 1, largest=True).indices).tolist()
+        for key in loggers.keys():
+            res = torch.tensor([val_test[0] for val_test in loggers[key].results[run]])
+            candidate_results.append(res[candidate_idxs].tolist())
+        candidate_results_mean = torch.mean(torch.Tensor(candidate_results), 0)
+        idx_to_test = [(candidate_idxs[torch.topk(candidate_results_mean, 1, largest=True).indices] + 1)]
+        if args.part_continue_from is not None: idx_to_test = [i+1000 for i in idx_to_test]
+        candidate_epochs = [i+1 for i in candidate_idxs] if args.part_continue_from is None else [i+1001 for i in candidate_idxs]
+        print(f'candidate_epochs: {candidate_epochs}\ncandidate_results: {candidate_results}\ncandidate_results_mean: {candidate_results_mean.tolist()}')
+        with open(log_file, 'a') as f:
+            print(f'candidate_epochs: {candidate_epochs}\ncandidate_results: {candidate_results}\ncandidate_results_mean: {candidate_results_mean.tolist()}', file=f)
+    else:
+        for key in loggers.keys():
+            res = torch.tensor([val_test[0] for val_test in loggers[key].results[run]])
+        idx_to_test = (
+            torch.topk(res, 1, largest=True).indices + 1
+        ).tolist()  # indices of top 1 valid results
+        if args.part_continue_from is not None: idx_to_test = [i+1000 for i in idx_to_test]
+
 
     for _idx, epoch in enumerate(idx_to_test):
         model_name = os.path.join(
